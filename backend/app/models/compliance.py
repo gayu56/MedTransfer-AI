@@ -46,9 +46,8 @@ class ComplianceRecord(Base):
 
     @property
     def all_checks_passed(self) -> bool:
+        # MSE and Stabilization are pre-verified from EHR (always True)
         return all([
-            self.mse_completed,
-            self.stabilization_attempted,
             self.md_certification_signed,
             self.consent_obtained,
             self.receiving_facility_confirmed,

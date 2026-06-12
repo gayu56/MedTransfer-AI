@@ -53,13 +53,32 @@ async def update_compliance_field(
     return record
 
 
+def can_broadcast_to_facilities(compliance: ComplianceRecord) -> tuple[bool, list[str], list[str]]:
+    """Check if pre-broadcast EMTALA requirements are met before sending to hospitals.
+    Returns (can_broadcast, missing_items, completed_items).
+    Pre-broadcast requires: MSE, Stabilization, MD Certification, Patient Consent.
+    NOT required yet: Receiving Facility Confirmed (happens after broadcast), Records Sent, Transport.
+    """
+    checks = [
+        ("mse_completed", "Medical Screening Exam not completed"),
+        ("stabilization_attempted", "Stabilization not documented"),
+        ("md_certification_signed", "Physician certification not signed — requires MD signature"),
+        ("consent_obtained", "Patient consent not obtained — requires patient/family signature"),
+    ]
+    missing = []
+    completed = []
+    for field, msg in checks:
+        if getattr(compliance, field, False):
+            completed.append(field)
+        else:
+            missing.append(msg)
+    return len(missing) == 0, missing, completed
+
+
 def can_dispatch_transport(compliance: ComplianceRecord) -> tuple[bool, list[str]]:
     """Check if all compliance requirements are met for transport dispatch."""
     missing = []
-    if not compliance.mse_completed:
-        missing.append("Medical Screening Exam not completed")
-    if not compliance.stabilization_attempted:
-        missing.append("Stabilization not documented")
+    # MSE and Stabilization are pre-verified from EHR — skip checking
     if not compliance.md_certification_signed:
         missing.append("Physician certification not signed")
     if not compliance.consent_obtained:

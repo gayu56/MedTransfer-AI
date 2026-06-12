@@ -128,13 +128,19 @@ async def create_transfer(req: TransferCreate, db: AsyncSession = Depends(get_db
         requested_unit_type=req.requested_unit_type,
         additional_notes=req.additional_notes,
     )
-    # Auto-match facilities
-    await facility_service.match_facilities(
+    # AGENTIC MESH: FacilityAgent matches and ranks hospitals
+    from app.ai.agents.orchestrator_agent import orchestrator_agent
+    await orchestrator_agent.fallback(
+        task=f"Match facilities for transfer {transfer.id}",
         db=db,
-        transfer_id=transfer.id,
-        sending_facility_id=DEFAULT_FACILITY_ID,
-        required_specialty=req.requested_specialty,
-        required_unit_type=req.requested_unit_type,
+        context={
+            "target_agent": "facility",
+            "action": "match",
+            "transfer_id": transfer.id,
+            "sending_facility_id": DEFAULT_FACILITY_ID,
+            "required_specialty": req.requested_specialty,
+            "required_unit_type": req.requested_unit_type,
+        },
     )
     transfer.status = "PENDING_REVIEW"
 
@@ -225,6 +231,25 @@ async def update_status(
     req: TransferStatusUpdate,
     db: AsyncSession = Depends(get_db),
 ):
+    # FIX 3 + AGENTIC MESH: ComplianceAgent enforces EMTALA dispatch gate
+    if req.status == "TRANSPORT_DISPATCHED":
+        from app.ai.agents.orchestrator_agent import orchestrator_agent
+        gate_result = await orchestrator_agent.fallback(
+            task=f"Enforce dispatch gate for transfer {transfer_id}",
+            db=db,
+            context={
+                "target_agent": "compliance",
+                "action": "enforce_gate",
+                "transfer_id": transfer_id,
+            },
+        )
+        compliance_result = gate_result.get("result", {})
+        if not compliance_result.get("allowed", False):
+            raise HTTPException(
+                status_code=400,
+                detail=compliance_result.get("message", "EMTALA HARD STOP: Compliance checks incomplete"),
+            )
+
     updated = await transfer_service.update_transfer_status(
         db, transfer_id, req.status, req.notes, DEFAULT_USER_ID,
     )

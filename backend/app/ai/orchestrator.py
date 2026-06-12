@@ -64,7 +64,9 @@ async def run_agent(
     """
     client, model = _get_llm_client()
     if not client:
+        print("[AGENT] No LLM client available — using fallback keyword matching")
         return _fallback_response(message, transfer_id, patient_id)
+    print(f"[AGENT] Using LLM: {model}")
 
     # Build messages
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -221,28 +223,60 @@ def _fallback_response(message: str, transfer_id: str | None, patient_id: str | 
     """Fallback when no LLM is available — basic keyword matching."""
     msg = message.lower().strip()
 
-    if any(kw in msg for kw in ["transfer", "send", "move", "start"]):
+    # Check specific multi-word / contextual phrases FIRST (before generic keywords)
+    if any(kw in msg for kw in ["active transfer", "show transfer", "list transfer", "status", "dashboard", "active", "ongoing", "pending"]):
+        text = ("Here's how to view active transfers:\n"
+                "• Go to the **Dashboard** to see all active transfers\n"
+                "• Or tell me a **transfer number** (e.g. TR-20260610-xxxx) to look up a specific one\n\n"
+                "You can also click **Transfers** in the sidebar.")
+    elif any(kw in msg for kw in ["emtala", "compliance", "checklist"]):
+        text = ("EMTALA requires all 7 items before transport:\n"
+                "✅ Auto-verified: Medical Screening Exam, Stabilization\n"
+                "✋ Manual: MD Certification, Patient Consent, Receiving Facility Confirmed, Transport Appropriate, Records Sent\n\n"
+                "Open a transfer detail page to see the compliance checklist.")
+    elif any(kw in msg for kw in ["sbar", "summary", "clinical"]):
+        text = ("I can generate an SBAR clinical summary. To do this:\n"
+                "1. Go to **New Transfer**\n"
+                "2. Select a patient and fill in transfer details\n"
+                "3. Click **Generate SBAR** on Step 3\n\n"
+                "Or tell me the **patient name** and I'll help you start.")
+    elif any(kw in msg for kw in ["call", "phone", "auto-call", "auto call"]):
+        text = ("To call facilities:\n"
+                "1. Open the **Transfer Detail** page for your transfer\n"
+                "2. Scroll to the **Call Center** panel\n"
+                "3. Click **Auto-Call Facilities** to have AI recommend a facility\n"
+                "4. Then **confirm acceptance** with the accepting physician's name\n\n"
+                "Remember: AI recommends, but a real clinician must confirm.")
+    elif any(kw in msg for kw in ["facility", "hospital", "bed", "match"]):
+        text = ("Facility matching happens automatically when you create a transfer.\n"
+                "Facilities are ranked by:\n"
+                "• **Specialty match** (30%) — does the facility have the needed capability?\n"
+                "• **Bed availability** (25%) — are beds open in the right unit?\n"
+                "• **Distance** (15%) — proximity to sending facility\n"
+                "• **Insurance** (15%) — coverage compatibility\n"
+                "• **History** (10%) — past acceptance rates")
+    elif any(kw in msg for kw in ["transfer", "send", "move", "start", "new", "create", "initiate"]):
         text = ("I can help you start a transfer. Please tell me:\n"
                 "1. **Patient name** or MRN\n"
                 "2. **Reason** for transfer\n"
-                "3. **Urgency** level (Emergent/Urgent/Routine)")
-    elif any(kw in msg for kw in ["sbar", "summary", "clinical"]):
-        text = "I can generate an SBAR summary. Please select a patient first, or tell me the patient name."
-    elif any(kw in msg for kw in ["emtala", "compliance", "checklist"]):
-        text = ("EMTALA requires all 7 items before transport:\n"
-                "✅ Auto: MSE, Stabilization, Receiving Confirmed, Transport Level\n"
-                "✋ Manual: MD Certification, Patient Consent, Records Sent")
-    elif any(kw in msg for kw in ["status", "dashboard", "active"]):
-        text = "Check the Dashboard for all active transfers, or give me a transfer number to look up."
-    elif any(kw in msg for kw in ["call", "phone", "facility"]):
-        text = "Go to the Transfer Detail page to see matched facilities and use the Call Center panel to call them."
-    else:
-        text = ("I'm the IPTC Transfer Assistant. I can:\n"
+                "3. **Urgency** level (Emergent/Urgent/Routine)\n\n"
+                "Or go to **New Transfer** in the sidebar to begin.")
+    elif any(kw in msg for kw in ["help", "what can you do", "hi", "hello", "hey"]):
+        text = ("👋 I'm the **MedTransfer AI Assistant**. I can help with:\n\n"
                 "• **Start a transfer** — search patients, generate SBAR, create transfer\n"
+                "• **Show active transfers** — view ongoing transfers and their status\n"
                 "• **Find facilities** — match and call receiving hospitals\n"
                 "• **Check compliance** — EMTALA checklist status\n"
-                "• **Track status** — get updates on active transfers\n\n"
+                "• **Auto-call facilities** — AI-powered facility outreach\n\n"
                 "What would you like to do?")
+    else:
+        text = ("I'm the **MedTransfer AI Assistant**. I can:\n"
+                "• **Start a transfer** — search patients, generate SBAR, create transfer\n"
+                "• **Show active transfers** — view ongoing transfers\n"
+                "• **Find facilities** — match and call receiving hospitals\n"
+                "• **Check compliance** — EMTALA checklist status\n"
+                "• **Auto-call facilities** — AI-powered facility outreach\n\n"
+                "Try saying: *\"Show active transfers\"* or *\"Start a new transfer\"*")
 
     return {
         "response": text,

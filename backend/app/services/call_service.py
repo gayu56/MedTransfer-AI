@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -189,14 +189,27 @@ async def simulate_call_outcome(
     accepting = facility.accepts_transfers
     total_avail_beds = sum(b.available_beds for b in facility.bed_availability) if facility.bed_availability else None
 
+    import random
+
     client, model = _get_llm_client()
     if not client:
-        # Fallback: simple rule-based simulation
+        # Fallback: probabilistic simulation (realistic distribution)
         if not accepting:
-            return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "Facility not currently accepting transfers.", "decline_reason": "Not accepting transfers at this time."}
+            return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "Facility not currently accepting transfers.", "decline_reason": "Not accepting transfers at this time.", "duration_seconds": random.randint(15, 30)}
         if not has_capability:
-            return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "Coordinator", "notes": f"Facility does not have {specialty} capability.", "decline_reason": f"No {specialty} capability."}
-        return {"outcome": "ACCEPTED", "contact_name": "Dr. Williams", "contact_role": "Attending Physician", "notes": f"Accepted patient {patient.full_name}. Bed available."}
+            return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "Coordinator", "notes": f"Facility does not have {specialty} capability.", "decline_reason": f"No {specialty} capability.", "duration_seconds": random.randint(20, 45)}
+        # Realistic odds: 40% accept, 30% decline, 20% no answer, 10% voicemail
+        roll = random.random()
+        doc_names = ["Dr. Williams", "Dr. Patel", "Dr. Chen", "Dr. Rodriguez", "Dr. Kim"]
+        if roll < 0.40:
+            return {"outcome": "ACCEPTED", "contact_name": random.choice(doc_names), "contact_role": "Attending Physician", "notes": f"Accepted patient {patient.full_name}. Bed available.", "duration_seconds": random.randint(60, 180)}
+        elif roll < 0.70:
+            decline_reasons = ["No ICU beds available at this time", "Unit at capacity — on diversion", "Staffing shortage — cannot accept", "Specialist on call unavailable"]
+            return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "Unable to accept at this time.", "decline_reason": random.choice(decline_reasons), "duration_seconds": random.randint(30, 90)}
+        elif roll < 0.90:
+            return {"outcome": "NO_ANSWER", "contact_name": None, "contact_role": None, "notes": "No answer after multiple attempts.", "duration_seconds": 45}
+        else:
+            return {"outcome": "VOICEMAIL", "contact_name": None, "contact_role": None, "notes": "Reached voicemail — left message with patient details.", "duration_seconds": 30}
 
     # AI-powered simulation
     prompt = f"""You are simulating a phone call between a sending hospital's transfer coordinator and a receiving facility.
@@ -217,9 +230,11 @@ PATIENT: {patient.full_name}, {patient.age}{patient.gender}
 RULES:
 - If the facility lacks the needed specialty/capability, they should DECLINE
 - If facility is not accepting transfers, DECLINE
-- If the top-ranked facility (#1 or #2) has capability, they usually ACCEPT
-- ~30% chance of NO_ANSWER or VOICEMAIL for lower-ranked facilities
+- Each facility independently decides based on current capacity, staffing, and patient acuity
+- Acceptance is NOT guaranteed regardless of rank — realistically ~40% of capable facilities accept
+- ~20% chance of NO_ANSWER, ~10% chance of VOICEMAIL for any facility
 - Include a realistic contact person name and role
+- Vary your responses — do NOT always accept the first facility
 
 Return ONLY valid JSON:
 {{
@@ -250,10 +265,103 @@ Return ONLY valid JSON:
         return data
     except Exception as e:
         print(f"LLM call simulation failed: {e}")
-        # Fallback
-        if has_capability and accepting:
-            return {"outcome": "ACCEPTED", "contact_name": "Dr. Smith", "contact_role": "Attending", "notes": "Accepted after review."}
-        return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "RN", "notes": "Unable to accept.", "decline_reason": "No capacity."}
+        # Fallback: same probabilistic logic as above
+        if not has_capability or not accepting:
+            return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "RN", "notes": "Unable to accept.", "decline_reason": "No capacity.", "duration_seconds": 30}
+        roll = random.random()
+        doc_names = ["Dr. Smith", "Dr. Patel", "Dr. Lee", "Dr. Garcia"]
+        if roll < 0.40:
+            return {"outcome": "ACCEPTED", "contact_name": random.choice(doc_names), "contact_role": "Attending", "notes": "Accepted after review.", "duration_seconds": random.randint(60, 120)}
+        elif roll < 0.70:
+            return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "At capacity.", "decline_reason": "No beds available.", "duration_seconds": random.randint(30, 60)}
+        else:
+            return {"outcome": "NO_ANSWER", "contact_name": None, "contact_role": None, "notes": "No answer.", "duration_seconds": 45}
+
+
+async def _decrement_beds(db: AsyncSession, facility_id: str) -> None:
+    """FIX 2: Decrement available beds by 1 when a facility accepts a transfer.
+    Increments occupied_beds on the first available bed row for the facility."""
+    beds_result = await db.execute(
+        select(BedAvailability)
+        .where(BedAvailability.facility_id == facility_id)
+        .where(BedAvailability.occupied_beds < BedAvailability.total_beds)
+        .order_by(BedAvailability.unit_type)
+        .limit(1)
+    )
+    bed = beds_result.scalar_one_or_none()
+    if bed:
+        bed.occupied_beds += 1
+        bed.last_updated_at = datetime.now(timezone.utc)
+        await db.flush()
+
+
+async def _increment_beds(db: AsyncSession, facility_id: str) -> None:
+    """FIX 2: Increment available beds by 1 when a transfer is cancelled/rejected.
+    Decrements occupied_beds on the first occupied bed row for the facility."""
+    beds_result = await db.execute(
+        select(BedAvailability)
+        .where(BedAvailability.facility_id == facility_id)
+        .where(BedAvailability.occupied_beds > 0)
+        .order_by(BedAvailability.unit_type)
+        .limit(1)
+    )
+    bed = beds_result.scalar_one_or_none()
+    if bed:
+        bed.occupied_beds -= 1
+        bed.last_updated_at = datetime.now(timezone.utc)
+        await db.flush()
+
+
+async def _cancel_other_facilities(
+    db: AsyncSession, transfer_id: str, accepted_facility_id: str
+) -> None:
+    """FIX 4: After atomic lock, cancel all other facilities that were contacted.
+    Updates their call_log status to CANCELLED and logs a timeline event."""
+    # Find all other call logs for this transfer that are not the accepted facility
+    other_calls_result = await db.execute(
+        select(CallLog)
+        .where(CallLog.transfer_id == transfer_id)
+        .where(CallLog.facility_id != accepted_facility_id)
+        .where(CallLog.outcome.notin_(["DECLINED", "CANCELLED"]))
+    )
+    other_calls = list(other_calls_result.scalars().all())
+
+    for call in other_calls:
+        call.outcome = "CANCELLED"
+        call.notes = (call.notes or "") + " | Auto-cancelled: transfer filled by another facility."
+        call.updated_at = datetime.now(timezone.utc)
+
+    # Also update facility matches
+    other_matches_result = await db.execute(
+        select(FacilityMatch)
+        .where(FacilityMatch.transfer_id == transfer_id)
+        .where(FacilityMatch.facility_id != accepted_facility_id)
+        .where(FacilityMatch.status.notin_(["ACCEPTED", "DECLINED"]))
+    )
+    other_matches = list(other_matches_result.scalars().all())
+
+    for match in other_matches:
+        match.status = "CANCELLED"
+        match.declined_reason = "Transfer accepted by another facility"
+        match.responded_at = datetime.now(timezone.utc)
+
+    # Timeline event for cancellation broadcast
+    if other_calls:
+        facility_names = []
+        for call in other_calls:
+            fac = await db.get(Facility, call.facility_id)
+            if fac:
+                facility_names.append(fac.name)
+
+        timeline = TransferTimeline(
+            transfer_id=transfer_id,
+            event_type="CANCELLATION_BROADCAST",
+            event_description=f"Cancellation sent to {len(other_calls)} facility(ies): {', '.join(facility_names)}",
+            triggered_by_system=True,
+        )
+        db.add(timeline)
+
+    await db.flush()
 
 
 async def run_auto_call_sequence(
@@ -261,9 +369,10 @@ async def run_auto_call_sequence(
     transfer_id: str,
 ) -> list[dict]:
     """
-    Simulate calling facilities in rank order. AI generates realistic outcomes.
-    IMPORTANT: Does NOT auto-accept. If AI predicts acceptance, it marks the call
-    as PENDING_CONFIRMATION — coordinator must confirm with accepting physician name.
+    BROADCAST MODEL: Send transfer request to ALL matched facilities simultaneously.
+    AI simulates each facility's response. The FIRST facility to accept is auto-locked
+    as the receiving facility. No manual confirmation needed — in real life, the
+    accepting hospital's physician name comes from their acceptance response.
     """
     # Get facility matches ordered by rank
     matches_result = await db.execute(
@@ -273,20 +382,39 @@ async def run_auto_call_sequence(
     )
     matches = list(matches_result.scalars().all())
 
-    # Filter to only uncalled/non-declined facilities
-    callable_matches = [m for m in matches if m.status not in ("ACCEPTED", "DECLINED", "PENDING_CONFIRMATION")]
+    # Filter to only facilities that haven't responded yet
+    broadcastable = [m for m in matches if m.status not in ("ACCEPTED", "DECLINED")]
+
+    # Mark all as SENT (broadcast)
+    for match in broadcastable:
+        match.status = "SENT"
+        match.responded_at = None
+
+    # Add broadcast timeline event
+    broadcast_timeline = TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="BROADCAST_SENT",
+        event_description=f"Transfer request broadcast to {len(broadcastable)} facilities simultaneously",
+        triggered_by_user_id="user-sarah-01",
+        triggered_by_system=True,
+    )
+    db.add(broadcast_timeline)
+    await db.flush()
 
     results = []
-    for match in callable_matches:
+    accepted_facility = None
+
+    # Simulate responses from ALL facilities (broadcast — all get the request)
+    for match in broadcastable:
         facility = await db.get(Facility, match.facility_id)
         fname = facility.name if facility else "Unknown"
 
-        # Create the call log (marked as simulated)
+        # Create the call/request log
         call = CallLog(
             transfer_id=transfer_id,
             facility_id=match.facility_id,
             called_by_user_id="user-sarah-01",
-            notes=f"AI-simulated call to {fname}",
+            notes=f"Broadcast transfer request sent to {fname}",
             call_started_at=datetime.now(timezone.utc),
             outcome="PENDING",
             is_simulated=True,
@@ -295,21 +423,70 @@ async def run_auto_call_sequence(
         db.add(call)
         await db.flush()
 
-        # Simulate the call outcome
+        # Simulate the facility's response
         sim = await simulate_call_outcome(db, transfer_id, match.facility_id)
         sim_outcome = sim.get("outcome", "NO_ANSWER")
 
-        # Update call with simulated outcome
         call.call_ended_at = datetime.now(timezone.utc)
         call.duration_seconds = sim.get("duration_seconds")
         call.notes = sim.get("notes")
         call.contact_name = sim.get("contact_name")
         call.contact_role = sim.get("contact_role")
 
-        if sim_outcome == "ACCEPTED":
-            # DO NOT auto-accept — mark as pending human confirmation
-            call.outcome = "PENDING_CONFIRMATION"
-            match.status = "PENDING_CONFIRMATION"
+        if sim_outcome == "ACCEPTED" and not accepted_facility:
+            # FIX 1: Atomic first-accept locking — single UPDATE with WHERE status guard
+            now = datetime.now(timezone.utc)
+            lock_result = await db.execute(
+                update(TransferRequest)
+                .where(TransferRequest.id == transfer_id)
+                .where(TransferRequest.status.in_(["INITIATED", "PENDING_REVIEW"]))
+                .values(
+                    status="ACCEPTED",
+                    receiving_facility_id=match.facility_id,
+                    accepted_at=now,
+                    updated_at=now,
+                )
+            )
+            if lock_result.rowcount == 1:
+                # Lock succeeded — this facility won the race
+                accepted_facility = match
+                call.outcome = "ACCEPTED"
+                call.accepting_physician = sim.get("contact_name", "Accepting Physician")
+                call.human_confirmed = True
+                match.status = "ACCEPTED"
+                match.responded_at = now
+
+                # Update compliance — receiving facility confirmed
+                cr_result = await db.execute(
+                    select(ComplianceRecord).where(ComplianceRecord.transfer_id == transfer_id)
+                )
+                cr = cr_result.scalar_one_or_none()
+                if cr:
+                    cr.receiving_facility_confirmed = True
+                    cr.receiving_confirmed_at = now
+
+                # FIX 2: Decrement bed count at accepting facility
+                await _decrement_beds(db, match.facility_id)
+
+                # FIX 4: Cancel all other contacted facilities asynchronously
+                await _cancel_other_facilities(db, transfer_id, match.facility_id)
+            else:
+                # Lock failed — another facility already accepted (race lost)
+                call.outcome = "DECLINED"
+                call.notes = "Transfer already locked by another facility"
+                match.status = "DECLINED"
+                match.declined_reason = "Transfer already accepted by another facility"
+                match.responded_at = datetime.now(timezone.utc)
+
+        elif sim_outcome == "ACCEPTED" and accepted_facility:
+            # Another facility accepted but we already have one — mark as late response
+            call.outcome = "DECLINED"
+            accepted_fac = await db.get(Facility, accepted_facility.facility_id)
+            accepted_name = accepted_fac.name if accepted_fac else "another facility"
+            call.notes = f"Accepted but {accepted_name} was already locked in"
+            match.status = "DECLINED"
+            match.declined_reason = "Another facility accepted first"
+            match.responded_at = datetime.now(timezone.utc)
         elif sim_outcome == "DECLINED":
             call.outcome = "DECLINED"
             call.decline_reason = sim.get("decline_reason")
@@ -318,18 +495,21 @@ async def run_auto_call_sequence(
             match.responded_at = datetime.now(timezone.utc)
         else:
             call.outcome = sim_outcome  # NO_ANSWER, VOICEMAIL, etc.
+            match.status = "NO_RESPONSE"
+            match.responded_at = datetime.now(timezone.utc)
 
-        # Add timeline event
+        # Timeline event per facility
         timeline = TransferTimeline(
             transfer_id=transfer_id,
-            event_type=f"AUTO_CALL_{call.outcome}",
-            event_description=f"AI-simulated call to {fname} — {call.outcome.replace('_', ' ').title()}"
+            event_type=f"BROADCAST_{call.outcome}",
+            event_description=f"{fname} — {call.outcome.replace('_', ' ').title()}"
                 + (f": {sim.get('notes', '')}" if sim.get('notes') else ""),
             triggered_by_user_id="user-sarah-01",
+            triggered_by_system=True,
         )
         db.add(timeline)
 
-        result_entry = {
+        results.append({
             "call_id": call.id,
             "facility_id": match.facility_id,
             "facility_name": fname,
@@ -337,16 +517,11 @@ async def run_auto_call_sequence(
             "outcome": call.outcome,
             "contact_name": sim.get("contact_name"),
             "contact_role": sim.get("contact_role"),
-            "notes": sim.get("notes"),
-            "decline_reason": sim.get("decline_reason"),
+            "notes": call.notes,
+            "decline_reason": sim.get("decline_reason") if call.outcome == "DECLINED" else None,
             "is_simulated": True,
-            "needs_confirmation": call.outcome == "PENDING_CONFIRMATION",
-        }
-        results.append(result_entry)
-
-        # If likely accepted, stop calling — but still needs confirmation
-        if call.outcome == "PENDING_CONFIRMATION":
-            break
+            "accepted": call.outcome == "ACCEPTED",
+        })
 
     await db.commit()
     return results

@@ -3,7 +3,7 @@ Agent tool definitions and executors.
 Each tool is a function the LLM can call via OpenAI function calling.
 """
 import json
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -216,14 +216,35 @@ async def execute_tool(tool_name: str, arguments: dict, db: AsyncSession) -> str
 
 async def _search_patient(db: AsyncSession, query: str) -> dict:
     q = f"%{query}%"
+    # Split query into parts to match first/last name individually
+    parts = query.strip().split()
+    conditions = [
+        Patient.first_name.ilike(q),
+        Patient.last_name.ilike(q),
+        Patient.mrn.ilike(q),
+    ]
+    # If multi-word query like "Dorothy Anderson", also match each word separately
+    for part in parts:
+        p = f"%{part}%"
+        conditions.append(Patient.first_name.ilike(p))
+        conditions.append(Patient.last_name.ilike(p))
+
     result = await db.execute(
-        select(Patient).where(
-            (Patient.first_name.ilike(q)) |
-            (Patient.last_name.ilike(q)) |
-            (Patient.mrn.ilike(q))
-        ).limit(5)
+        select(Patient).where(or_(*conditions)).limit(5)
     )
     patients = result.scalars().all()
+
+    # If multi-word, prioritize patients matching ALL parts
+    if len(parts) > 1 and len(patients) > 1:
+        def match_score(p):
+            score = 0
+            for part in parts:
+                pl = part.lower()
+                if pl in (p.first_name or "").lower() or pl in (p.last_name or "").lower():
+                    score += 1
+            return score
+        patients = sorted(patients, key=match_score, reverse=True)
+
     if not patients:
         return {"found": False, "message": f"No patients found matching '{query}'"}
 

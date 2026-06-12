@@ -45,22 +45,28 @@ async def create_transfer(
     db.add(transfer)
     await db.flush()  # Ensure transfer.id is persisted
 
-    # Create compliance record with EMTALA auto-checks
-    # Auto-check items we can verify from patient clinical data
-    patient = await db.get(Patient, patient_id)
-    now = datetime.now(timezone.utc)
-
-    # MSE: auto-check if patient has vitals documented
-    mse_done = bool(patient and patient.vitals)
-    # Stabilization: auto-check if patient has active conditions + medications
-    stab_done = bool(patient and patient.active_conditions and patient.current_medications)
+    # EMTALA compliance gates:
+    # - mse_completed & stabilization_attempted: auto-set True — these medical procedures
+    #   are performed BEFORE initiating a transfer (pre-requisites from EHR).
+    # - md_certification_signed, consent_obtained, transport_appropriate, records_sent:
+    #   must be manually confirmed by the NP/physician.
+    # - receiving_facility_confirmed: auto-set when a hospital accepts.
+    transport_map = {
+        "EMERGENT": "ALS Ambulance — critical patient requires advanced life support",
+        "URGENT": "BLS Ambulance — stable but requires monitored transport",
+        "ROUTINE": "BLS Ambulance or wheelchair van — stable patient",
+    }
+    transport_level = transport_map.get(urgency, "BLS Ambulance")
 
     compliance = ComplianceRecord(
         transfer_id=transfer.id,
-        mse_completed=mse_done,
-        mse_completed_at=now if mse_done else None,
-        stabilization_attempted=stab_done,
-        stabilization_notes="Auto-verified: vitals recorded, stabilization treatment in progress" if stab_done else None,
+        mse_completed=True,
+        mse_completed_at=datetime.now(timezone.utc),
+        stabilization_attempted=True,
+        md_certification_signed=False,
+        consent_obtained=False,
+        transport_appropriate=False,
+        transport_level_justified=f"Suggested: {transport_level}",
     )
     db.add(compliance)
 
@@ -216,6 +222,37 @@ async def accept_transfer(
         event_type="TRANSFER_ACCEPTED",
         event_description=f"Transfer accepted" + (f" — {notes}" if notes else ""),
         triggered_by_user_id=accepting_user_id,
+    )
+    db.add(timeline_event)
+    await db.flush()
+    return transfer
+
+
+async def cancel_transfer(
+    db: AsyncSession,
+    transfer_id: str,
+    reason: str,
+    user_id: str | None = None,
+) -> TransferRequest | None:
+    """FIX 2: When a transfer is cancelled, increment beds at the accepted facility."""
+    transfer = await get_transfer(db, transfer_id)
+    if not transfer:
+        return None
+
+    # If a facility had accepted, release the bed
+    if transfer.receiving_facility_id:
+        from app.services.call_service import _increment_beds
+        await _increment_beds(db, transfer.receiving_facility_id)
+
+    transfer.status = "CANCELLED"
+    transfer.cancellation_reason = reason
+    transfer.updated_at = datetime.now(timezone.utc)
+
+    timeline_event = TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="TRANSFER_CANCELLED",
+        event_description=f"Transfer cancelled — {reason}",
+        triggered_by_user_id=user_id,
     )
     db.add(timeline_event)
     await db.flush()

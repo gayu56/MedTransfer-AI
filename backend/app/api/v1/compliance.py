@@ -74,6 +74,22 @@ async def update_compliance(
     )
 
 
+@router.get("/{transfer_id}/can-broadcast")
+async def check_can_broadcast(transfer_id: str, db: AsyncSession = Depends(get_db)):
+    """Check if pre-broadcast EMTALA items are complete before sending transfer to facilities."""
+    record = await compliance_service.get_compliance(db, transfer_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Compliance record not found")
+
+    can_broadcast, missing, completed = compliance_service.can_broadcast_to_facilities(record)
+    return {
+        "can_broadcast": can_broadcast,
+        "missing_items": missing,
+        "completed_items": completed,
+        "message": "Ready to send transfer request to facilities" if can_broadcast else f"{len(missing)} EMTALA item(s) must be completed before contacting facilities",
+    }
+
+
 @router.get("/{transfer_id}/can-dispatch")
 async def check_can_dispatch(transfer_id: str, db: AsyncSession = Depends(get_db)):
     record = await compliance_service.get_compliance(db, transfer_id)

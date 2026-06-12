@@ -104,16 +104,34 @@ async def get_transfer_calls(transfer_id: str, db: AsyncSession = Depends(get_db
 
 @router.post("/auto-call/{transfer_id}")
 async def run_auto_call(transfer_id: str, db: AsyncSession = Depends(get_db)):
-    """Run AI-simulated call sequence. Does NOT auto-accept — requires human confirmation."""
-    results = await call_service.run_auto_call_sequence(db, transfer_id)
-    pending = any(r["outcome"] == "PENDING_CONFIRMATION" for r in results)
+    """AGENTIC MESH: Orchestrator delegates broadcast to OutreachAgent.
+    OutreachAgent contacts all facilities, FacilityAgent updates beds on accept,
+    ComplianceAgent starts monitoring EMTALA after acceptance."""
+    from app.ai.agents.orchestrator_agent import orchestrator_agent
+
+    result = await orchestrator_agent.fallback(
+        task=f"Broadcast transfer {transfer_id} to all matched facilities",
+        db=db,
+        context={
+            "target_agent": "outreach",
+            "action": "broadcast",
+            "transfer_id": transfer_id,
+        },
+    )
+
+    # Extract the outreach result for backward-compatible response
+    outreach_result = result.get("result", {})
+    results = outreach_result.get("results", [])
+    accepted = next((r for r in results if r.get("accepted")), None)
     return {
         "transfer_id": transfer_id,
-        "calls_made": len(results),
+        "broadcast_count": outreach_result.get("broadcast_count", len(results)),
         "results": results,
-        "needs_confirmation": pending,
-        "pending_facility": next((r["facility_name"] for r in results if r["outcome"] == "PENDING_CONFIRMATION"), None),
-        "pending_call_id": next((r["call_id"] for r in results if r["outcome"] == "PENDING_CONFIRMATION"), None),
+        "accepted": accepted is not None,
+        "accepted_facility": accepted["facility_name"] if accepted else None,
+        "accepted_by": accepted["contact_name"] if accepted else None,
+        "agent_mesh": True,
+        "orchestrator_response": result.get("response"),
     }
 
 
@@ -142,6 +160,20 @@ async def confirm_acceptance(req: ConfirmAcceptanceRequest, db: AsyncSession = D
         "accepting_physician": call.accepting_physician,
         "message": f"Transfer accepted by {facility.name if facility else 'facility'} — confirmed by Dr. {call.accepting_physician}",
     }
+
+
+@router.get("/mesh-status/{transfer_id}")
+async def get_mesh_status(transfer_id: str):
+    """Get the agentic mesh event log for a transfer — shows inter-agent communication."""
+    from app.ai.agents.orchestrator_agent import orchestrator_agent
+    return orchestrator_agent._get_mesh_status(transfer_id)
+
+
+@router.get("/mesh-status")
+async def get_full_mesh_status():
+    """Get the full agentic mesh event log — all agents, all transfers."""
+    from app.ai.agents.orchestrator_agent import orchestrator_agent
+    return orchestrator_agent._get_mesh_status()
 
 
 @router.post("/script", response_model=CallScriptResponse)

@@ -220,7 +220,7 @@ def _get_llm_client():
             base_url="https://openrouter.ai/api/v1",
             default_headers={
                 "HTTP-Referer": "http://localhost:4000",
-                "X-Title": "IPTC – Patient Transfer Coordinator",
+                "X-Title": "IPTC - Patient Transfer Coordinator",
             },
         )
         return client, settings.openrouter_model
