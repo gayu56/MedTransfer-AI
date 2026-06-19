@@ -55,12 +55,18 @@ export const updateCompliance = (transferId: string, data: any) =>
 export const checkCanDispatch = (transferId: string) =>
   request<any>(`/compliance/${transferId}/can-dispatch`)
 
+export const checkCanBroadcast = (transferId: string) =>
+  request<any>(`/compliance/${transferId}/can-broadcast`)
+
 // AI Agent
 export const chatWithAgent = (data: any) =>
   request<any>('/agent/chat', { method: 'POST', body: JSON.stringify(data) })
 
 export const generateSBAR = (data: any) =>
   request<any>('/agent/sbar/generate', { method: 'POST', body: JSON.stringify(data) })
+
+export const reviewSBAR = (sbarId: string, data: { situation?: string; background?: string; assessment?: string; recommendation?: string; approved: boolean }) =>
+  request<any>(`/agent/sbar/${sbarId}/review`, { method: 'PATCH', body: JSON.stringify(data) })
 
 // Calls
 export const fetchCallsForTransfer = (transferId: string) =>
@@ -77,6 +83,10 @@ export const generateCallScript = (data: { transfer_id: string; facility_id: str
 
 export const runAutoCall = (transferId: string) =>
   request<any>(`/calls/auto-call/${transferId}`, { method: 'POST' })
+
+// Phase 1 AI audio agent: calls facilities, records transcripts, proposes acceptances
+export const runAICall = (transferId: string) =>
+  request<any>(`/calls/ai-call/${transferId}`, { method: 'POST' })
 
 export const confirmAcceptance = (data: { call_id: string; accepting_physician: string; contact_name?: string; contact_role?: string; notes?: string }) =>
   request<any>('/calls/confirm-acceptance', { method: 'POST', body: JSON.stringify(data) })

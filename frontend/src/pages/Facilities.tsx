@@ -23,18 +23,18 @@ export default function Facilities() {
   if (loading) return <div className="p-8 text-slate-500">Loading facilities...</div>
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="p-6 max-w-7xl mx-auto animate-fade-in">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Facilities</h1>
+        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Facilities</h1>
         <p className="text-sm text-slate-500 mt-1">Network hospitals and their capabilities</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {facilities.map((f: any) => (
-          <div key={f.id} className="bg-white rounded-xl border border-slate-200 p-5">
+        {facilities.map((f: any, i: number) => (
+          <div key={f.id} className="card card-hover p-5 animate-fade-in-up" style={{ animationDelay: `${i * 40}ms` }}>
             <div className="flex items-start justify-between mb-3">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-primary-50 flex items-center justify-center">
+                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-primary-50 to-primary-100 flex items-center justify-center shadow-sm">
                   <Building2 className="w-5 h-5 text-primary-600" />
                 </div>
                 <div>
