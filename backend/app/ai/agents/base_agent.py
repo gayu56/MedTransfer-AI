@@ -75,7 +75,7 @@ class BaseAgent(ABC):
             "events_emitted": [...], # Events published to the bus
         }
         """
-        client, model = _get_llm_client()
+        client, model = _get_llm_client(use_tool_model=True)
         if not client:
             print(f"[{self.agent_name}] No LLM — using fallback")
             return await self.fallback(task, db, context)

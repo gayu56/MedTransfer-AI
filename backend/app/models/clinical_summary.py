@@ -33,6 +33,8 @@ class ClinicalSummary(Base):
     ai_model_version: Mapped[str | None] = mapped_column(String(50))
     reviewed_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    human_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    edited_by_human: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

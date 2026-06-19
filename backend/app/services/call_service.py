@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update, text
@@ -9,6 +10,45 @@ from app.models.transfer import TransferRequest, TransferTimeline, FacilityMatch
 from app.models.facility import Facility, FacilityCapability, BedAvailability
 from app.models.patient import Patient
 from app.models.compliance import ComplianceRecord
+
+# Clinical synonyms for fuzzy specialty matching in fallback mode
+_CLINICAL_SYNONYMS: dict[str, set[str]] = {
+    "CARDIOLOGY": {"CARDIAC", "CARDIOTHORACIC", "HEART", "CARDIOVASCULAR", "CATH LAB", "CCU"},
+    "NEUROLOGY": {"NEURO", "STROKE", "NEUROSCIENCE", "NEURO-INTERVENTIONAL"},
+    "PULMONOLOGY": {"PULMONARY", "RESPIRATORY", "LUNG"},
+    "ORTHOPEDICS": {"ORTHO", "ORTHOPEDIC", "MUSCULOSKELETAL", "JOINT", "SPINE"},
+    "TRAUMA": {"TRAUMA CENTER", "LEVEL I", "LEVEL II", "LEVEL 1", "LEVEL 2"},
+    "SURGERY": {"SURGICAL", "OPERATING", "OR"},
+    "ICU": {"INTENSIVE CARE", "CRITICAL CARE", "CCU", "MICU", "SICU"},
+    "NEPHROLOGY": {"RENAL", "KIDNEY", "DIALYSIS"},
+    "ONCOLOGY": {"CANCER", "TUMOR", "HEMATOLOGY"},
+    "GASTROENTEROLOGY": {"GI", "GASTRO", "HEPATOLOGY", "LIVER"},
+    "PEDIATRICS": {"PEDS", "PEDIATRIC", "NICU", "PICU", "CHILDREN"},
+}
+
+
+def _fuzzy_capability_match(specialty: str, cap_names: list[str]) -> bool:
+    """Check if a facility likely has the needed specialty using bidirectional
+    substring matching + clinical synonym lookup."""
+    if not specialty:
+        return True
+    s = specialty.upper().strip()
+    caps_upper = [c.upper() for c in cap_names]
+
+    # Direct bidirectional substring
+    for cap in caps_upper:
+        if s in cap or cap in s:
+            return True
+
+    # Synonym expansion
+    for canonical, synonyms in _CLINICAL_SYNONYMS.items():
+        all_terms = synonyms | {canonical}
+        if any(term in s for term in all_terms):
+            # Specialty matches a synonym group — check if facility has any term from same group
+            if any(term in cap for term in all_terms for cap in caps_upper):
+                return True
+
+    return False
 
 
 async def create_call_log(
@@ -182,12 +222,23 @@ async def simulate_call_outcome(
 
     patient = transfer.patient
 
-    # Check if facility has the needed capability
+    # Check if facility has the needed capability (fuzzy match + already-ranked trust)
     cap_names = [c.name for c in facility.capabilities] if facility.capabilities else []
     specialty = (transfer.requested_specialty or "").upper()
-    has_capability = any(specialty in str(c).upper() for c in cap_names) if specialty else True
+    has_capability = _fuzzy_capability_match(specialty, cap_names)
     accepting = facility.accepts_transfers
     total_avail_beds = sum(b.available_beds for b in facility.bed_availability) if facility.bed_availability else None
+
+    # Trust the matching engine: if this facility was already ranked, give it credit
+    match_result = await db.execute(
+        select(FacilityMatch).where(
+            FacilityMatch.transfer_id == transfer_id,
+            FacilityMatch.facility_id == facility_id,
+        )
+    )
+    existing_match = match_result.scalar_one_or_none()
+    if existing_match and existing_match.specialty_score and existing_match.specialty_score >= 40:
+        has_capability = True  # Matching engine already scored it positively
 
     import random
 
@@ -198,10 +249,10 @@ async def simulate_call_outcome(
             return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "Facility not currently accepting transfers.", "decline_reason": "Not accepting transfers at this time.", "duration_seconds": random.randint(15, 30)}
         if not has_capability:
             return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "Coordinator", "notes": f"Facility does not have {specialty} capability.", "decline_reason": f"No {specialty} capability.", "duration_seconds": random.randint(20, 45)}
-        # Realistic odds: 40% accept, 30% decline, 20% no answer, 10% voicemail
+        # Realistic odds: 55% accept, 25% decline, 12% no answer, 8% voicemail
         roll = random.random()
         doc_names = ["Dr. Williams", "Dr. Patel", "Dr. Chen", "Dr. Rodriguez", "Dr. Kim"]
-        if roll < 0.40:
+        if roll < 0.55:
             return {"outcome": "ACCEPTED", "contact_name": random.choice(doc_names), "contact_role": "Attending Physician", "notes": f"Accepted patient {patient.full_name}. Bed available.", "duration_seconds": random.randint(60, 180)}
         elif roll < 0.70:
             decline_reasons = ["No ICU beds available at this time", "Unit at capacity — on diversion", "Staffing shortage — cannot accept", "Specialist on call unavailable"]
@@ -247,35 +298,665 @@ Return ONLY valid JSON:
 }}"""
 
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You simulate hospital transfer phone calls. Return only JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=300,
-            response_format={"type": "json_object"},
+        from app.config import settings as _settings
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You simulate hospital transfer phone calls. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=300,
+            ),
+            timeout=_settings.llm_timeout_call_sim,
         )
-        data = _json.loads(response.choices[0].message.content)
+        from app.ai.sbar_generator import extract_json
+        data = extract_json(response.choices[0].message.content)
+        if not isinstance(data, dict):
+            raise ValueError("LLM did not return a valid JSON object")
         # Validate outcome
         valid_outcomes = {"ACCEPTED", "DECLINED", "NO_ANSWER", "VOICEMAIL", "CALLBACK_REQUESTED"}
         if data.get("outcome") not in valid_outcomes:
             data["outcome"] = "NO_ANSWER"
         return data
+    except asyncio.TimeoutError:
+        print(f"LLM call simulation timed out — using fallback")
     except Exception as e:
         print(f"LLM call simulation failed: {e}")
-        # Fallback: same probabilistic logic as above
-        if not has_capability or not accepting:
-            return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "RN", "notes": "Unable to accept.", "decline_reason": "No capacity.", "duration_seconds": 30}
-        roll = random.random()
-        doc_names = ["Dr. Smith", "Dr. Patel", "Dr. Lee", "Dr. Garcia"]
-        if roll < 0.40:
-            return {"outcome": "ACCEPTED", "contact_name": random.choice(doc_names), "contact_role": "Attending", "notes": "Accepted after review.", "duration_seconds": random.randint(60, 120)}
-        elif roll < 0.70:
-            return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "At capacity.", "decline_reason": "No beds available.", "duration_seconds": random.randint(30, 60)}
+
+    # Fallback: probabilistic logic
+    if not has_capability or not accepting:
+        return {"outcome": "DECLINED", "contact_name": "Transfer Center", "contact_role": "RN", "notes": "Unable to accept.", "decline_reason": "No capacity.", "duration_seconds": 30}
+    roll = random.random()
+    doc_names = ["Dr. Smith", "Dr. Patel", "Dr. Lee", "Dr. Garcia"]
+    if roll < 0.55:
+        return {"outcome": "ACCEPTED", "contact_name": random.choice(doc_names), "contact_role": "Attending", "notes": "Accepted after review.", "duration_seconds": random.randint(60, 120)}
+    elif roll < 0.80:
+        return {"outcome": "DECLINED", "contact_name": "Charge Nurse", "contact_role": "RN", "notes": "At capacity.", "decline_reason": "No beds available.", "duration_seconds": random.randint(30, 60)}
+    else:
+        return {"outcome": "NO_ANSWER", "contact_name": None, "contact_role": None, "notes": "No answer.", "duration_seconds": 45}
+
+
+async def simulate_call_conversation(
+    db: AsyncSession,
+    transfer_id: str,
+    facility_id: str,
+) -> dict:
+    """
+    PHASE 1 AUDIO AGENT: Simulate a realistic BACK-AND-FORTH phone conversation
+    between the AI transfer coordinator and the receiving facility's staff.
+
+    Returns the structured outcome PLUS a turn-by-turn transcript:
+        {
+          "outcome": "ACCEPTED" | "DECLINED" | "NO_ANSWER" | "VOICEMAIL",
+          "transcript": [{"speaker": "AI"|"FACILITY", "text": "..."}],
+          "contact_name", "contact_role", "accepting_physician",
+          "bed_type", "decline_reason", "notes", "duration_seconds"
+        }
+
+    The AI never finalizes — an ACCEPTED outcome here is only a PROPOSAL that a
+    human clinician must confirm before the transfer is locked.
+    """
+    from app.ai.sbar_generator import _get_llm_client
+    import json as _json
+    import random
+
+    # Load transfer + patient
+    result = await db.execute(
+        select(TransferRequest)
+        .where(TransferRequest.id == transfer_id)
+        .options(
+            selectinload(TransferRequest.patient),
+            selectinload(TransferRequest.sending_facility),
+            selectinload(TransferRequest.clinical_summary),
+        )
+    )
+    transfer = result.scalar_one_or_none()
+
+    fac_result = await db.execute(
+        select(Facility)
+        .where(Facility.id == facility_id)
+        .options(
+            selectinload(Facility.capabilities),
+            selectinload(Facility.bed_availability),
+        )
+    )
+    facility = fac_result.scalar_one_or_none()
+
+    if not transfer or not facility:
+        return {
+            "outcome": "NO_ANSWER",
+            "transcript": [{"speaker": "AI", "text": "Attempting to reach the transfer line..."},
+                           {"speaker": "FACILITY", "text": "(no answer)"}],
+            "notes": "Could not reach facility.",
+        }
+
+    patient = transfer.patient
+    cap_names = [c.name for c in facility.capabilities] if facility.capabilities else []
+    specialty = (transfer.requested_specialty or "").upper()
+    has_capability = _fuzzy_capability_match(specialty, cap_names)
+    accepting = facility.accepts_transfers
+    total_avail_beds = sum(b.available_beds for b in facility.bed_availability) if facility.bed_availability else None
+    sending_name = transfer.sending_facility.name if transfer.sending_facility else "the sending facility"
+    unit_type = transfer.requested_unit_type or "an appropriate bed"
+
+    # Trust the matching engine: if already ranked with a decent score, don't override
+    match_result = await db.execute(
+        select(FacilityMatch).where(
+            FacilityMatch.transfer_id == transfer_id,
+            FacilityMatch.facility_id == facility_id,
+        )
+    )
+    existing_match = match_result.scalar_one_or_none()
+    if existing_match and existing_match.specialty_score and existing_match.specialty_score >= 40:
+        has_capability = True
+
+    client, model = _get_llm_client()
+
+    if client:
+        prompt = f"""You are simulating a realistic phone call for a patient transfer. Produce a natural,
+turn-by-turn conversation between:
+- "AI": the AI transfer coordinator calling on behalf of {sending_name}
+- "FACILITY": the receiving hospital's transfer nurse / charge RN at {facility.name}
+
+The AI opens by identifying itself as an AI coordinator, gives a concise SBAR-style summary,
+and asks if they can accept. The FACILITY asks 1-2 clarifying questions; the AI answers.
+The FACILITY then accepts (giving a bed type + accepting physician name) or declines (giving a reason).
+
+CONTEXT
+Receiving facility: {facility.name} — capabilities: {', '.join(cap_names) or 'General'};
+accepts transfers: {accepting}; beds available: {total_avail_beds if total_avail_beds is not None else 'unknown'}.
+Patient: {patient.full_name}, {patient.age}{patient.gender}; urgency {transfer.urgency};
+reason: {transfer.reason_for_transfer}; specialty needed: {specialty or 'General'}; unit: {unit_type}.
+
+RULES
+- If the facility lacks the needed specialty/capability or is not accepting, they DECLINE.
+- Otherwise about 45% accept; the rest decline (capacity/staffing) — don't always accept.
+- Keep it to 4-8 short turns. Realistic, professional clinical phone tone.
+
+Return ONLY valid JSON:
+{{
+  "outcome": "ACCEPTED" | "DECLINED" | "NO_ANSWER" | "VOICEMAIL",
+  "transcript": [{{"speaker": "AI"|"FACILITY", "text": "..."}}],
+  "contact_name": "nurse/coordinator name or null",
+  "contact_role": "role or null",
+  "accepting_physician": "Dr. Name if accepted, else null",
+  "bed_type": "e.g. 'ICU Bed 4' if accepted, else null",
+  "decline_reason": "reason if declined, else null",
+  "notes": "one-line summary",
+  "duration_seconds": integer
+}}"""
+        try:
+            from app.config import settings as _settings
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You simulate realistic hospital transfer phone calls. Return only JSON."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    max_tokens=800,
+                ),
+                timeout=_settings.llm_timeout_call_sim,
+            )
+            from app.ai.sbar_generator import extract_json
+            data = extract_json(response.choices[0].message.content)
+            if not isinstance(data, dict):
+                raise ValueError("LLM did not return a valid JSON object")
+            if data.get("outcome") not in {"ACCEPTED", "DECLINED", "NO_ANSWER", "VOICEMAIL"}:
+                data["outcome"] = "NO_ANSWER"
+            if not isinstance(data.get("transcript"), list) or not data["transcript"]:
+                data["transcript"] = [{"speaker": "AI", "text": data.get("notes", "Call completed.")}]
+            return data
+        except asyncio.TimeoutError:
+            print(f"LLM conversation simulation timed out — using fallback")
+        except Exception as e:
+            print(f"LLM conversation simulation failed: {e}")
+            # fall through to deterministic fallback
+
+    # ── Deterministic fallback (no LLM) — still produces a transcript ──
+    opener = {
+        "speaker": "AI",
+        "text": (f"Hello, this is the AI transfer coordinator calling from {sending_name} on behalf of "
+                 f"Dr. {patient.last_name if patient else 'the attending'}. I have a {patient.age}{patient.gender} "
+                 f"patient, {transfer.urgency.lower()} priority, for {transfer.reason_for_transfer}. "
+                 f"Do you have {unit_type} and can you accept?"),
+    }
+
+    if not accepting or not has_capability:
+        reason = ("not currently accepting transfers" if not accepting
+                  else f"no {specialty or 'specialty'} capability available")
+        return {
+            "outcome": "DECLINED",
+            "transcript": [
+                opener,
+                {"speaker": "FACILITY", "text": f"Thanks for calling. Unfortunately we're {reason} right now."},
+                {"speaker": "AI", "text": "Understood, thank you. I'll continue contacting other facilities."},
+            ],
+            "contact_name": "Charge Nurse",
+            "contact_role": "RN",
+            "decline_reason": reason.capitalize(),
+            "notes": f"Declined — {reason}.",
+            "duration_seconds": random.randint(25, 60),
+        }
+
+    roll = random.random()
+    if roll < 0.60:
+        doc = random.choice(["Dr. Patel", "Dr. Chen", "Dr. Williams", "Dr. Rodriguez", "Dr. Kim"])
+        nurse = random.choice(["Karen", "Mike", "Priya", "Tom"])
+        unit = random.choice(["ICU Bed 4", "CCU Bed 2", "Med-Surg Bed 7", "Step-down Bed 3"])
+        return {
+            "outcome": "ACCEPTED",
+            "transcript": [
+                opener,
+                {"speaker": "FACILITY", "text": f"This is {nurse}, charge nurse. What's the patient's current status and code status?"},
+                {"speaker": "AI", "text": f"Hemodynamically stable, full code, on standard monitoring. Specialty needed is {specialty or 'general'}. Insurance is {patient.insurance_provider or 'on file'}."},
+                {"speaker": "FACILITY", "text": f"Okay, we can take this patient. I'll put them in {unit}. {doc} will be the accepting physician."},
+                {"speaker": "AI", "text": f"Thank you. Confirming {facility.name} accepts, {unit}, accepting physician {doc}. I'll send the SBAR and records now."},
+            ],
+            "contact_name": nurse,
+            "contact_role": "Charge Nurse",
+            "accepting_physician": doc,
+            "bed_type": unit,
+            "notes": f"Proposed acceptance — {unit}, {doc}.",
+            "duration_seconds": random.randint(90, 200),
+        }
+    else:
+        reason = random.choice([
+            "No ICU beds available at this time",
+            "Unit at capacity — on diversion",
+            "Staffing shortage — cannot accept",
+            "Specialist on call unavailable",
+        ])
+        return {
+            "outcome": "DECLINED",
+            "transcript": [
+                opener,
+                {"speaker": "FACILITY", "text": f"Let me check capacity... I'm sorry, {reason.lower()}."},
+                {"speaker": "AI", "text": "Understood, thank you for checking. I'll reach out to other facilities."},
+            ],
+            "contact_name": "Charge Nurse",
+            "contact_role": "RN",
+            "decline_reason": reason,
+            "notes": f"Declined — {reason.lower()}.",
+            "duration_seconds": random.randint(40, 90),
+        }
+
+
+async def run_ai_call_sequence(db: AsyncSession, transfer_id: str) -> list[dict]:
+    """
+    PHASE 1: AI audio agent calls ALL matched facilities, holds a back-and-forth
+    conversation with each, and records transcripts + outcomes.
+
+    Critically, the AI does NOT lock any transfer. An acceptance is recorded as
+    a PROPOSED_ACCEPT that a human clinician must confirm (via confirm_acceptance)
+    before the transfer status becomes ACCEPTED. The human owns the final decision.
+    """
+    import json as _json
+
+    matches_result = await db.execute(
+        select(FacilityMatch)
+        .where(FacilityMatch.transfer_id == transfer_id)
+        .order_by(FacilityMatch.rank)
+    )
+    matches = list(matches_result.scalars().all())
+    callable_matches = [m for m in matches if m.status not in ("ACCEPTED", "DECLINED", "CANCELLED")]
+
+    db.add(TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="AI_CALLS_STARTED",
+        event_description=f"AI audio agent calling facilities in priority order (stops on first acceptance)",
+        triggered_by_system=True,
+    ))
+    await db.flush()
+
+    results = []
+    for match in callable_matches:
+        facility = await db.get(Facility, match.facility_id)
+        fname = facility.name if facility else "Unknown"
+
+        # Mark only the facility currently being dialed
+        match.status = "CALLING"
+        match.responded_at = None
+        await db.flush()
+
+        call = CallLog(
+            transfer_id=transfer_id,
+            facility_id=match.facility_id,
+            called_by_user_id="user-sarah-01",
+            call_started_at=datetime.now(timezone.utc),
+            outcome="PENDING",
+            is_simulated=True,
+            human_confirmed=False,
+        )
+        db.add(call)
+        await db.flush()
+
+        convo = await simulate_call_conversation(db, transfer_id, match.facility_id)
+        sim_outcome = convo.get("outcome", "NO_ANSWER")
+
+        call.call_ended_at = datetime.now(timezone.utc)
+        call.duration_seconds = convo.get("duration_seconds")
+        call.notes = convo.get("notes")
+        call.contact_name = convo.get("contact_name")
+        call.contact_role = convo.get("contact_role")
+        call.bed_type = convo.get("bed_type")
+        call.transcript = _json.dumps(convo.get("transcript", []))
+
+        if sim_outcome == "ACCEPTED":
+            # PROPOSED only — do NOT lock the transfer. Awaits human confirmation.
+            call.outcome = "PROPOSED_ACCEPT"
+            call.accepting_physician = convo.get("accepting_physician")
+            match.status = "AWAITING_CONFIRMATION"
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = "AI_CALL_PROPOSED_ACCEPT"
+            event_desc = (f"{fname} verbally accepted via AI call — bed {convo.get('bed_type') or 'TBD'}, "
+                          f"physician {convo.get('accepting_physician') or 'TBD'}. Awaiting clinician confirmation.")
+        elif sim_outcome == "DECLINED":
+            call.outcome = "DECLINED"
+            call.decline_reason = convo.get("decline_reason")
+            match.status = "DECLINED"
+            match.declined_reason = convo.get("decline_reason")
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = "AI_CALL_DECLINED"
+            event_desc = f"{fname} declined via AI call — {convo.get('decline_reason') or 'no reason given'}"
         else:
-            return {"outcome": "NO_ANSWER", "contact_name": None, "contact_role": None, "notes": "No answer.", "duration_seconds": 45}
+            call.outcome = sim_outcome
+            match.status = "NO_RESPONSE"
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = f"AI_CALL_{sim_outcome}"
+            event_desc = f"{fname} — {sim_outcome.replace('_', ' ').title()}"
+
+        db.add(TransferTimeline(
+            transfer_id=transfer_id,
+            event_type=event_type,
+            event_description=event_desc,
+            triggered_by_system=True,
+        ))
+
+        results.append({
+            "call_id": call.id,
+            "facility_id": match.facility_id,
+            "facility_name": fname,
+            "rank": match.rank,
+            "outcome": call.outcome,
+            "contact_name": call.contact_name,
+            "contact_role": call.contact_role,
+            "accepting_physician": call.accepting_physician,
+            "bed_type": call.bed_type,
+            "decline_reason": convo.get("decline_reason") if call.outcome == "DECLINED" else None,
+            "notes": call.notes,
+            "transcript": convo.get("transcript", []),
+            "is_simulated": True,
+            "proposed": call.outcome == "PROPOSED_ACCEPT",
+        })
+
+        # Stop dialing once a facility verbally accepts — no need to call the rest.
+        if call.outcome == "PROPOSED_ACCEPT":
+            break
+
+    proposed = [r for r in results if r["proposed"]]
+    db.add(TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="AI_CALLS_COMPLETED",
+        event_description=(f"AI calls complete — {len(proposed)} verbal acceptance(s) awaiting clinician confirmation"
+                           if proposed else "AI calls complete — no acceptances; consider expanding search"),
+        triggered_by_system=True,
+    ))
+
+    await db.commit()
+    return results
+
+
+async def run_ai_call_parallel(db: AsyncSession, transfer_id: str) -> list[dict]:
+    """
+    PARALLEL CALLING: AI audio agent calls ALL matched facilities SIMULTANEOUSLY.
+    Every facility gets called at once. The first ACCEPTED facility becomes a
+    PROPOSED_ACCEPT awaiting human confirmation; any additional acceptances are
+    marked SUPERSEDED. Declined / no-answer facilities are recorded normally.
+
+    Returns results for ALL facilities (not just until first accept) so the
+    frontend can display them in a war-room multi-panel view.
+    """
+    import json as _json
+    import random
+
+    matches_result = await db.execute(
+        select(FacilityMatch)
+        .where(FacilityMatch.transfer_id == transfer_id)
+        .order_by(FacilityMatch.rank)
+    )
+    matches = list(matches_result.scalars().all())
+    callable_matches = [m for m in matches if m.status not in ("ACCEPTED", "DECLINED", "CANCELLED")]
+
+    if not callable_matches:
+        return []
+
+    # Mark ALL facilities as CALLING simultaneously
+    for match in callable_matches:
+        match.status = "CALLING"
+        match.responded_at = None
+
+    db.add(TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="AI_PARALLEL_CALLS_STARTED",
+        event_description=f"AI calling {len(callable_matches)} facilities simultaneously",
+        triggered_by_system=True,
+    ))
+    await db.flush()
+
+    # Pre-load facility names and create call log entries for ALL facilities
+    entries: list[tuple] = []
+    for match in callable_matches:
+        facility = await db.get(Facility, match.facility_id)
+        fname = facility.name if facility else "Unknown"
+        call = CallLog(
+            transfer_id=transfer_id,
+            facility_id=match.facility_id,
+            called_by_user_id="user-sarah-01",
+            call_started_at=datetime.now(timezone.utc),
+            outcome="PENDING",
+            is_simulated=True,
+            human_confirmed=False,
+        )
+        db.add(call)
+        entries.append((match, call, fname))
+    await db.flush()
+
+    # Run ALL simulations (DB access is serialised by aiosqlite, but the
+    # critical point is that we call every facility — not just until first accept)
+    sim_data: list[tuple] = []
+    for match, call, fname in entries:
+        convo = await simulate_call_conversation(db, transfer_id, match.facility_id)
+        sim_data.append((match, call, fname, convo))
+
+    # Process results — first verbal accept wins
+    results: list[dict] = []
+    first_accept_id = None
+
+    for idx, (match, call, fname, convo) in enumerate(sim_data):
+        sim_outcome = convo.get("outcome", "NO_ANSWER")
+
+        call.call_ended_at = datetime.now(timezone.utc)
+        call.duration_seconds = convo.get("duration_seconds")
+        call.notes = convo.get("notes")
+        call.contact_name = convo.get("contact_name")
+        call.contact_role = convo.get("contact_role")
+        call.bed_type = convo.get("bed_type")
+        call.transcript = _json.dumps(convo.get("transcript", []))
+
+        if sim_outcome == "ACCEPTED" and first_accept_id is None:
+            first_accept_id = call.id
+            call.outcome = "PROPOSED_ACCEPT"
+            call.accepting_physician = convo.get("accepting_physician")
+            match.status = "AWAITING_CONFIRMATION"
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = "AI_CALL_PROPOSED_ACCEPT"
+            event_desc = (f"{fname} verbally accepted — bed {convo.get('bed_type') or 'TBD'}, "
+                          f"physician {convo.get('accepting_physician') or 'TBD'}. Awaiting confirmation.")
+        elif sim_outcome == "ACCEPTED":
+            call.outcome = "SUPERSEDED"
+            call.accepting_physician = convo.get("accepting_physician")
+            match.status = "SUPERSEDED"
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = "AI_CALL_SUPERSEDED"
+            event_desc = f"{fname} also accepted but another facility responded first"
+        elif sim_outcome == "DECLINED":
+            call.outcome = "DECLINED"
+            call.decline_reason = convo.get("decline_reason")
+            match.status = "DECLINED"
+            match.declined_reason = convo.get("decline_reason")
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = "AI_CALL_DECLINED"
+            event_desc = f"{fname} declined — {convo.get('decline_reason') or 'no reason given'}"
+        else:
+            call.outcome = sim_outcome
+            match.status = "NO_RESPONSE"
+            match.responded_at = datetime.now(timezone.utc)
+            event_type = f"AI_CALL_{sim_outcome}"
+            event_desc = f"{fname} — {sim_outcome.replace('_', ' ').title()}"
+
+        db.add(TransferTimeline(
+            transfer_id=transfer_id,
+            event_type=event_type,
+            event_description=event_desc,
+            triggered_by_system=True,
+        ))
+
+        # Staggered delay hint for frontend war-room playback
+        results.append({
+            "call_id": call.id,
+            "facility_id": match.facility_id,
+            "facility_name": fname,
+            "rank": match.rank,
+            "outcome": call.outcome,
+            "contact_name": call.contact_name,
+            "contact_role": call.contact_role,
+            "accepting_physician": convo.get("accepting_physician"),
+            "bed_type": call.bed_type,
+            "decline_reason": convo.get("decline_reason") if call.outcome == "DECLINED" else None,
+            "notes": call.notes,
+            "transcript": convo.get("transcript", []),
+            "is_simulated": True,
+            "proposed": call.outcome == "PROPOSED_ACCEPT",
+            "superseded": call.outcome == "SUPERSEDED",
+            "delay": round(random.uniform(0.5, 3.0) + idx * 0.4, 2),
+        })
+
+    proposed = [r for r in results if r["proposed"]]
+    db.add(TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="AI_PARALLEL_CALLS_COMPLETED",
+        event_description=(f"Parallel calls complete — {len(proposed)} acceptance(s) awaiting confirmation"
+                           if proposed else "Parallel calls complete — no acceptances"),
+        triggered_by_system=True,
+    ))
+
+    await db.commit()
+    return results
+
+
+async def run_ai_call_with_retry(
+    db: AsyncSession,
+    transfer_id: str,
+    max_retries: int = 2,
+    initial_radius: float = 50.0,
+    radius_step: float = 25.0,
+    extra_results: int = 3,
+) -> dict:
+    """
+    Runs parallel AI calls. If no facility accepts, automatically expands the
+    search radius and retries with newly discovered facilities.
+
+    Returns:
+        {
+            "results": [...],       # all call results across all rounds
+            "rounds": int,          # how many rounds were executed
+            "retry_details": [...], # per-round info (radius, new_matches, etc.)
+            "has_proposed_acceptance": bool,
+        }
+    """
+    from app.services.facility_service import match_facilities
+
+    all_results: list[dict] = []
+    retry_details: list[dict] = []
+
+    # Load transfer to get needed parameters for re-matching
+    tr_result = await db.execute(
+        select(TransferRequest)
+        .where(TransferRequest.id == transfer_id)
+        .options(selectinload(TransferRequest.patient))
+    )
+    transfer = tr_result.scalar_one_or_none()
+    if not transfer:
+        return {"results": [], "rounds": 0, "retry_details": [], "has_proposed_acceptance": False}
+
+    # Round 1 — use existing matches
+    results = await run_ai_call_parallel(db, transfer_id)
+    all_results.extend(results)
+    proposed = [r for r in results if r.get("proposed")]
+    retry_details.append({
+        "round": 1,
+        "radius_miles": initial_radius,
+        "facilities_called": len(results),
+        "proposed": len(proposed),
+    })
+
+    if proposed:
+        return {
+            "results": all_results,
+            "rounds": 1,
+            "retry_details": retry_details,
+            "has_proposed_acceptance": True,
+        }
+
+    # Retry rounds — expand search radius and find new facilities
+    current_radius = initial_radius
+    already_called_ids = {r["facility_id"] for r in all_results}
+
+    for attempt in range(max_retries):
+        current_radius += radius_step
+        round_num = attempt + 2
+
+        db.add(TransferTimeline(
+            transfer_id=transfer_id,
+            event_type="AI_RETRY_EXPANDING_SEARCH",
+            event_description=(
+                f"No acceptance in round {round_num - 1}. "
+                f"Expanding search radius to {current_radius:.0f} miles (round {round_num})"
+            ),
+            triggered_by_system=True,
+        ))
+        await db.flush()
+
+        # Re-match with wider radius
+        new_matches = await match_facilities(
+            db=db,
+            transfer_id=transfer_id,
+            sending_facility_id=transfer.sending_facility_id,
+            required_specialty=transfer.requested_specialty,
+            required_unit_type=transfer.requested_unit_type,
+            insurance_provider=transfer.patient.insurance_provider if transfer.patient else None,
+            max_distance_miles=current_radius,
+            max_results=extra_results + len(already_called_ids),  # get more to fill gaps
+        )
+
+        # Filter out facilities we've already called
+        fresh_match_ids = [m.facility_id for m in new_matches if m.facility_id not in already_called_ids]
+
+        if not fresh_match_ids:
+            retry_details.append({
+                "round": round_num,
+                "radius_miles": current_radius,
+                "facilities_called": 0,
+                "proposed": 0,
+                "note": "No new facilities found in expanded radius",
+            })
+            continue
+
+        # Run parallel calls for new matches only
+        results = await run_ai_call_parallel(db, transfer_id)
+        # Filter to only new facilities (parallel func may re-process all)
+        new_results = [r for r in results if r["facility_id"] not in already_called_ids]
+        all_results.extend(new_results)
+        already_called_ids.update(r["facility_id"] for r in new_results)
+
+        proposed = [r for r in new_results if r.get("proposed")]
+        retry_details.append({
+            "round": round_num,
+            "radius_miles": current_radius,
+            "facilities_called": len(new_results),
+            "proposed": len(proposed),
+        })
+
+        if proposed:
+            return {
+                "results": all_results,
+                "rounds": round_num,
+                "retry_details": retry_details,
+                "has_proposed_acceptance": True,
+            }
+
+    # All retries exhausted — no acceptance
+    db.add(TransferTimeline(
+        transfer_id=transfer_id,
+        event_type="AI_RETRY_EXHAUSTED",
+        event_description=(
+            f"No acceptance after {len(retry_details)} rounds "
+            f"(max radius {current_radius:.0f} mi). Consider manual outreach."
+        ),
+        triggered_by_system=True,
+    ))
+    await db.commit()
+
+    return {
+        "results": all_results,
+        "rounds": len(retry_details),
+        "retry_details": retry_details,
+        "has_proposed_acceptance": False,
+    }
 
 
 async def _decrement_beds(db: AsyncSession, facility_id: str) -> None:
@@ -774,23 +1455,31 @@ MEDICATIONS: {', '.join([m.get('name', '') for m in meds[:5]])}
 ADDITIONAL NOTES: {transfer.additional_notes or 'None'}"""
 
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            max_tokens=1500,
-            response_format={"type": "json_object"},
+        from app.config import settings as _settings
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=1500,
+            ),
+            timeout=_settings.llm_timeout_call_sim,
         )
 
-        import json
+        from app.ai.sbar_generator import extract_json
         content = response.choices[0].message.content
-        data = json.loads(content)
+        data = extract_json(content)
+        if not isinstance(data, dict):
+            raise ValueError("LLM did not return a valid JSON object")
         data["facility_name"] = facility.name
         data["facility_phone"] = facility.phone
         return data
+    except asyncio.TimeoutError:
+        print(f"LLM call script generation timed out — using template")
+        return None
     except Exception as e:
         print(f"LLM call script generation failed: {e}")
         return None

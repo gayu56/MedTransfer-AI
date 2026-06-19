@@ -62,7 +62,7 @@ async def run_agent(
         "tool_calls_made": [...], # Raw tool call details for frontend display
     }
     """
-    client, model = _get_llm_client()
+    client, model = _get_llm_client(use_tool_model=True)
     if not client:
         print("[AGENT] No LLM client available — using fallback keyword matching")
         return _fallback_response(message, transfer_id, patient_id)

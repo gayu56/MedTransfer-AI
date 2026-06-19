@@ -4,12 +4,55 @@ Generates SBAR (Situation-Background-Assessment-Recommendation) summaries
 from structured patient data. Uses LLM when available, falls back to
 template-based generation.
 """
+import asyncio
 import json
+import re
 from datetime import datetime, timezone
 
 from app.config import settings
 from app.models.patient import Patient
 from app.models.clinical_summary import ClinicalSummary
+
+
+def extract_json(text: str) -> dict | list | None:
+    """Robustly extract JSON from LLM output that may contain markdown fences
+    or surrounding prose.  Returns the parsed object or None."""
+    if not text:
+        return None
+    text = text.strip()
+    # 1. Direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # 2. Extract from ```json ... ``` or ``` ... ``` fenced blocks
+    fence_match = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # Also check for fenced arrays
+    fence_arr = re.search(r"```(?:json)?\s*\n?(\[.*?\])\s*```", text, re.DOTALL)
+    if fence_arr:
+        try:
+            return json.loads(fence_arr.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # 3. Find first { ... } or [ ... ] in the text (greedy)
+    brace_match = re.search(r"(\{[\s\S]*\})", text)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    bracket_match = re.search(r"(\[[\s\S]*\])", text)
+    if bracket_match:
+        try:
+            return json.loads(bracket_match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
 
 
 SBAR_SYSTEM_PROMPT = """You are a clinical documentation assistant generating SBAR transfer summaries.
@@ -197,9 +240,13 @@ def generate_sbar_template(
     }
 
 
-def _get_llm_client():
+def _get_llm_client(use_tool_model: bool = False):
     """Return (client, model) tuple based on configured provider priority:
     1. Azure OpenAI  2. OpenRouter  3. OpenAI direct  4. None
+
+    If *use_tool_model* is True and the provider is OpenRouter, the
+    tool-capable model (nvidia/nemotron-3-ultra) is returned instead of
+    the default chat model so that function-calling / tools work.
     """
     from openai import AsyncOpenAI
 
@@ -223,7 +270,8 @@ def _get_llm_client():
                 "X-Title": "IPTC - Patient Transfer Coordinator",
             },
         )
-        return client, settings.openrouter_model
+        model = settings.openrouter_tool_model if use_tool_model else settings.openrouter_model
+        return client, model
 
     # 3. OpenAI direct
     if settings.openai_api_key:
@@ -260,19 +308,25 @@ async def generate_sbar_with_llm(
             additional_context=additional_context or "None",
         )
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SBAR_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.1,
-            max_tokens=2000,
-            response_format={"type": "json_object"},
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": SBAR_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2000,
+            ),
+            timeout=settings.llm_timeout_sbar,
         )
 
         content = response.choices[0].message.content
-        return json.loads(content)
+        parsed = extract_json(content)
+        return parsed if isinstance(parsed, dict) else None
+    except asyncio.TimeoutError:
+        print(f"LLM SBAR generation timed out after {settings.llm_timeout_sbar}s — falling back to template")
+        return None
     except Exception as e:
         print(f"LLM SBAR generation failed: {e}")
         return None

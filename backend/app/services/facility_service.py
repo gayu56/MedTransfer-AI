@@ -1,11 +1,99 @@
+import asyncio
 import math
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.facility import Facility, FacilityCapability, BedAvailability
-from app.models.transfer import FacilityMatch
+from app.models.transfer import FacilityMatch, TransferRequest
+from app.models.call_log import CallLog
+
+
+async def _llm_specialty_score(
+    required_specialty: str,
+    facility_capabilities: list[str],
+    reason_for_transfer: str | None = None,
+) -> float | None:
+    """Use LLM to semantically score how well a facility's capabilities match
+    the patient's required specialty. Returns 0-100 or None if LLM unavailable.
+
+    This handles clinical synonym matching like:
+      - 'Cardiac Surgery' ↔ 'Cardiothoracic Surgery'
+      - 'Stroke' ↔ 'Neurology / Neuro-interventional'
+      - 'Trauma' ↔ 'Level I Trauma Center'
+    """
+    from app.ai.sbar_generator import _get_llm_client, extract_json
+
+    client, model = _get_llm_client()
+    if not client:
+        return None
+
+    caps_str = ", ".join(facility_capabilities) if facility_capabilities else "General medical/surgical"
+    context = f" The patient needs transfer for: {reason_for_transfer}." if reason_for_transfer else ""
+
+    prompt = f"""Score how well this facility can handle the patient's needs.
+
+Required specialty: {required_specialty}{context}
+Facility capabilities: {caps_str}
+
+Consider clinical synonyms (e.g., Cardiac Surgery = Cardiothoracic, Stroke = Neurology).
+Return ONLY a JSON object: {{"score": <0-100>, "reason": "one-line explanation"}}
+
+Scoring guide:
+- 100: Exact match or clear clinical synonym
+- 70-90: Strong match (related subspecialty or parent specialty)
+- 40-60: Partial match (general capability that could handle it)
+- 10-30: Weak match (tangentially related)
+- 0: No relevant capability"""
+
+    try:
+        from app.config import settings as _settings
+        response = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a clinical matching assistant. Return only JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=100,
+            ),
+            timeout=_settings.llm_timeout_specialty,
+        )
+        data = extract_json(response.choices[0].message.content)
+        if isinstance(data, dict) and "score" in data:
+            return max(0.0, min(100.0, float(data["score"])))
+    except asyncio.TimeoutError:
+        print(f"LLM specialty matching timed out — falling back to string matching")
+    except Exception as e:
+        print(f"LLM specialty matching failed: {e}")
+    return None
+
+
+async def _historical_acceptance_rate(db: AsyncSession, facility_id: str) -> float:
+    """Compute acceptance score (0-100) from past CallLog outcomes.
+    Falls back to 60.0 if no call history exists (neutral prior)."""
+    total_result = await db.execute(
+        select(func.count()).where(
+            CallLog.facility_id == facility_id,
+            CallLog.outcome.in_(["ACCEPTED", "PROPOSED_ACCEPT", "DECLINED", "NO_ANSWER", "VOICEMAIL"]),
+        )
+    )
+    total = total_result.scalar() or 0
+    if total < 2:
+        return 60.0  # Not enough data — neutral prior
+
+    accepted_result = await db.execute(
+        select(func.count()).where(
+            CallLog.facility_id == facility_id,
+            CallLog.outcome.in_(["ACCEPTED", "PROPOSED_ACCEPT"]),
+        )
+    )
+    accepted = accepted_result.scalar() or 0
+    rate = (accepted / total) * 100
+    # Blend with prior: 70% real data + 30% neutral (60) to avoid extremes
+    return round(rate * 0.7 + 60 * 0.3, 1)
 
 
 def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -61,6 +149,10 @@ async def match_facilities(
     if not sending or not sending.latitude or not sending.longitude:
         return []
 
+    # Load transfer for reason_for_transfer (used in LLM specialty matching)
+    transfer_obj = await db.get(TransferRequest, transfer_id)
+    reason_for_transfer = transfer_obj.reason_for_transfer if transfer_obj else None
+
     facilities = await list_facilities(db, accepts_transfers=True)
     scored: list[dict] = []
 
@@ -78,21 +170,31 @@ async def match_facilities(
             continue
 
         # --- Scoring ---
-        # Specialty match (0-100)
+        # Specialty match (0-100) — try LLM semantic matching first
+        cap_names = [c.name for c in facility.capabilities if c.is_active]
+        cap_names_upper = [n.upper() for n in cap_names]
         specialty_score = 0.0
+
         if required_specialty:
-            cap_names = [c.name.upper() for c in facility.capabilities if c.is_active]
-            if required_specialty.upper() in cap_names:
-                specialty_score = 100.0
-            elif any(required_specialty.upper() in cn for cn in cap_names):
-                specialty_score = 70.0
+            # Try LLM semantic matching
+            llm_score = await _llm_specialty_score(
+                required_specialty, cap_names,
+                reason_for_transfer=reason_for_transfer,
+            )
+            if llm_score is not None:
+                specialty_score = llm_score
+            else:
+                # Fallback: string matching
+                if required_specialty.upper() in cap_names_upper:
+                    specialty_score = 100.0
+                elif any(required_specialty.upper() in cn for cn in cap_names_upper):
+                    specialty_score = 70.0
         else:
             specialty_score = 50.0
 
         # Service match
         if required_services:
-            cap_names = [c.name.upper() for c in facility.capabilities if c.is_active]
-            matched = sum(1 for s in required_services if s.upper() in cap_names)
+            matched = sum(1 for s in required_services if s.upper() in cap_names_upper)
             service_bonus = (matched / len(required_services)) * 30
             specialty_score = min(100, specialty_score + service_bonus)
 
@@ -117,10 +219,16 @@ async def match_facilities(
         distance_score = max(0, 100 - (distance / max_distance_miles) * 100)
 
         # Insurance score (0-100)
-        insurance_score = 80.0  # Default in MVP (no real insurance check)
+        insurance_score = 80.0  # Default (no real insurance API yet)
+        if insurance_provider and hasattr(facility, 'accepted_insurances'):
+            accepted_ins = [ins.upper() for ins in (facility.accepted_insurances or [])]
+            if insurance_provider.upper() in accepted_ins:
+                insurance_score = 100.0
+            elif accepted_ins:  # Has a list but patient's insurance not in it
+                insurance_score = 30.0
 
-        # Historical acceptance (0-100)
-        historical_score = 75.0  # Default in MVP
+        # Historical acceptance (0-100) — computed from real CallLog data
+        historical_score = await _historical_acceptance_rate(db, facility.id)
 
         # Weighted overall
         overall = (

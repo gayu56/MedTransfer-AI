@@ -15,9 +15,15 @@ class Settings(BaseSettings):
     azure_openai_deployment_name: str = "gpt-4"
     azure_openai_api_version: str = "2024-06-01"
 
-    # OpenRouter
+    # OpenRouter (free models — no billing required)
     openrouter_api_key: str = ""
-    openrouter_model: str = "openai/gpt-4o"
+    openrouter_model: str = "meta-llama/llama-3.1-8b-instruct:free"
+    openrouter_tool_model: str = "meta-llama/llama-3.1-8b-instruct:free"
+
+    # LLM timeout in seconds (falls back to template/deterministic if exceeded)
+    llm_timeout_sbar: int = 30
+    llm_timeout_call_sim: int = 30
+    llm_timeout_specialty: int = 15
 
     # Standard OpenAI fallback
     openai_api_key: str = ""

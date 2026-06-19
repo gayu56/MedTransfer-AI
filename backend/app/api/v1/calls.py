@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -78,6 +79,17 @@ async def update_call(call_id: str, req: CallLogUpdate, db: AsyncSession = Depen
     )
 
 
+def _parse_transcript(raw: str | None) -> list:
+    if not raw:
+        return []
+    import json
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 @router.get("/transfer/{transfer_id}", response_model=list[CallLogResponse])
 async def get_transfer_calls(transfer_id: str, db: AsyncSession = Depends(get_db)):
     calls = await call_service.get_calls_for_transfer(db, transfer_id)
@@ -96,6 +108,11 @@ async def get_transfer_calls(transfer_id: str, db: AsyncSession = Depends(get_db
             callback_time=c.callback_time,
             notes=c.notes,
             call_script_used=c.call_script_used,
+            is_simulated=c.is_simulated,
+            human_confirmed=c.human_confirmed,
+            accepting_physician=c.accepting_physician,
+            bed_type=c.bed_type,
+            transcript=_parse_transcript(c.transcript),
             created_at=c.created_at,
         )
         for c in calls
@@ -107,7 +124,19 @@ async def run_auto_call(transfer_id: str, db: AsyncSession = Depends(get_db)):
     """AGENTIC MESH: Orchestrator delegates broadcast to OutreachAgent.
     OutreachAgent contacts all facilities, FacilityAgent updates beds on accept,
     ComplianceAgent starts monitoring EMTALA after acceptance."""
+    from app.models.clinical_summary import ClinicalSummary
     from app.ai.agents.orchestrator_agent import orchestrator_agent
+
+    # Gate: SBAR must be human-verified before broadcast
+    sbar_result = await db.execute(
+        select(ClinicalSummary).where(ClinicalSummary.transfer_id == transfer_id)
+    )
+    sbar = sbar_result.scalar_one_or_none()
+    if not sbar or not sbar.human_verified:
+        raise HTTPException(
+            status_code=400,
+            detail="SBAR must be reviewed and approved by a clinician before broadcasting.",
+        )
 
     result = await orchestrator_agent.fallback(
         task=f"Broadcast transfer {transfer_id} to all matched facilities",
@@ -132,6 +161,62 @@ async def run_auto_call(transfer_id: str, db: AsyncSession = Depends(get_db)):
         "accepted_by": accepted["contact_name"] if accepted else None,
         "agent_mesh": True,
         "orchestrator_response": result.get("response"),
+    }
+
+
+@router.post("/ai-call/{transfer_id}")
+async def run_ai_call(transfer_id: str, db: AsyncSession = Depends(get_db)):
+    """PHASE 1 AUDIO AGENT: The AI calls every matched facility, holds a back-and-forth
+    conversation, and records transcripts + outcomes. Acceptances are recorded as
+    PROPOSED_ACCEPT only — a clinician must confirm (with accepting physician) before
+    the transfer is locked. The AI never finalizes the decision."""
+    from app.models.clinical_summary import ClinicalSummary
+
+    # Gate: SBAR must be human-verified before any outreach
+    sbar_result = await db.execute(
+        select(ClinicalSummary).where(ClinicalSummary.transfer_id == transfer_id)
+    )
+    sbar = sbar_result.scalar_one_or_none()
+    if not sbar or not sbar.human_verified:
+        raise HTTPException(
+            status_code=400,
+            detail="SBAR must be reviewed and approved by a clinician before the AI can call facilities.",
+        )
+
+    results = await call_service.run_ai_call_parallel(db, transfer_id)
+    proposed = [r for r in results if r.get("proposed")]
+    superseded = [r for r in results if r.get("superseded")]
+    return {
+        "transfer_id": transfer_id,
+        "call_count": len(results),
+        "results": results,
+        "has_proposed_acceptance": len(proposed) > 0,
+        "proposed_count": len(proposed),
+        "superseded_count": len(superseded),
+        "parallel": True,
+    }
+
+
+@router.post("/ai-call-retry/{transfer_id}")
+async def run_ai_call_with_retry(transfer_id: str, db: AsyncSession = Depends(get_db)):
+    """AI calls with auto-retry. If all facilities decline, automatically expands
+    the search radius and calls newly found facilities. Up to 3 rounds total."""
+    from app.models.clinical_summary import ClinicalSummary
+
+    sbar_result = await db.execute(
+        select(ClinicalSummary).where(ClinicalSummary.transfer_id == transfer_id)
+    )
+    sbar = sbar_result.scalar_one_or_none()
+    if not sbar or not sbar.human_verified:
+        raise HTTPException(
+            status_code=400,
+            detail="SBAR must be reviewed and approved by a clinician before the AI can call facilities.",
+        )
+
+    result = await call_service.run_ai_call_with_retry(db, transfer_id)
+    return {
+        "transfer_id": transfer_id,
+        **result,
     }
 
 

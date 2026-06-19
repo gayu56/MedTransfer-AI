@@ -22,6 +22,11 @@ class CallLogUpdate(BaseModel):
     accepting_physician: str | None = None  # REQUIRED when outcome is ACCEPTED
 
 
+class TranscriptTurn(BaseModel):
+    speaker: str
+    text: str
+
+
 class CallLogResponse(BaseModel):
     id: str
     transfer_id: str
@@ -39,6 +44,8 @@ class CallLogResponse(BaseModel):
     is_simulated: bool = False
     human_confirmed: bool = False
     accepting_physician: str | None = None
+    bed_type: str | None = None
+    transcript: list[TranscriptTurn] = []
     created_at: datetime | None = None
 
     class Config:

@@ -10,6 +10,7 @@ from app.models.clinical_summary import ClinicalSummary
 from app.schemas.agent import (
     AgentChatRequest, AgentChatResponse, AgentAction, SuggestedAction,
     SBARGenerateRequest, SBARResponse, SBARVerification, SBARVerificationFlag,
+    SBARReviewRequest,
 )
 from app.ai.sbar_generator import generate_sbar
 from app.ai.sbar_verifier import verify_sbar_against_ehr
@@ -117,5 +118,53 @@ async def generate_sbar_endpoint(req: SBARGenerateRequest, db: AsyncSession = De
         assessment=sbar_dict["assessment"],
         recommendation=sbar_dict["recommendation"],
         generated_by_ai=was_ai,
+        human_verified=False,
+        edited_by_human=False,
         verification=verification_data,
     )
+
+
+@router.patch("/sbar/{sbar_id}/review")
+async def review_sbar(sbar_id: str, req: SBARReviewRequest, db: AsyncSession = Depends(get_db)):
+    """Human-in-the-loop: review, optionally edit, and approve an AI-generated SBAR."""
+    from datetime import datetime, timezone
+
+    result = await db.execute(select(ClinicalSummary).where(ClinicalSummary.id == sbar_id))
+    summary = result.scalar_one_or_none()
+    if not summary:
+        raise HTTPException(status_code=404, detail="SBAR not found")
+
+    edited = False
+    if req.situation is not None and req.situation != summary.situation:
+        summary.situation = req.situation
+        edited = True
+    if req.background is not None and req.background != summary.background:
+        summary.background = req.background
+        edited = True
+    if req.assessment is not None and req.assessment != summary.assessment:
+        summary.assessment = req.assessment
+        edited = True
+    if req.recommendation is not None and req.recommendation != summary.recommendation:
+        summary.recommendation = req.recommendation
+        edited = True
+
+    if edited:
+        summary.edited_by_human = True
+        summary.version += 1
+
+    if req.approved:
+        summary.human_verified = True
+        summary.reviewed_at = datetime.now(timezone.utc)
+        summary.reviewed_by_user_id = "user-sarah-01"  # TODO: from auth context
+
+    summary.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.commit()
+
+    return {
+        "id": summary.id,
+        "human_verified": summary.human_verified,
+        "edited_by_human": summary.edited_by_human,
+        "version": summary.version,
+        "reviewed_at": summary.reviewed_at.isoformat() if summary.reviewed_at else None,
+    }

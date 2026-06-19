@@ -64,4 +64,14 @@ class SBARResponse(BaseModel):
     assessment: str
     recommendation: str
     generated_by_ai: bool = True
+    human_verified: bool = False
+    edited_by_human: bool = False
     verification: SBARVerification | None = None
+
+
+class SBARReviewRequest(BaseModel):
+    situation: str | None = None
+    background: str | None = None
+    assessment: str | None = None
+    recommendation: str | None = None
+    approved: bool = True

@@ -51,6 +51,8 @@ class ClinicalSummaryResponse(BaseModel):
     recommendation: str
     generated_by_ai: bool = False
     version: int = 1
+    human_verified: bool = False
+    edited_by_human: bool = False
     reviewed_at: datetime | None = None
     created_at: datetime | None = None
 

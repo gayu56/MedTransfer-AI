@@ -25,12 +25,16 @@ class CallLog(Base):
 
     # Outcome
     outcome: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
-    # PENDING, CONNECTED, ACCEPTED, DECLINED, NO_ANSWER, VOICEMAIL, CALLBACK_REQUESTED, TRANSFERRED_TO_MD
+    # PENDING, CONNECTED, ACCEPTED, PROPOSED_ACCEPT, DECLINED, NO_ANSWER, VOICEMAIL, CALLBACK_REQUESTED, TRANSFERRED_TO_MD
     decline_reason: Mapped[str | None] = mapped_column(Text)
     callback_time: Mapped[str | None] = mapped_column(String(100))
     accepting_physician: Mapped[str | None] = mapped_column(String(200))  # REQUIRED for ACCEPTED — real clinician who agreed
+    bed_type: Mapped[str | None] = mapped_column(String(100))  # Bed/unit offered by the receiving facility
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # True if AI-simulated, not a real call
     human_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)  # Coordinator confirmed the outcome
+
+    # AI audio-agent conversation transcript (Phase 1): JSON list of {speaker, text}
+    transcript: Mapped[str | None] = mapped_column(Text)
 
     # Notes
     notes: Mapped[str | None] = mapped_column(Text)

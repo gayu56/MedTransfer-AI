@@ -51,6 +51,7 @@ def _build_transfer_response(transfer) -> TransferResponse:
             id=cs.id, situation=cs.situation, background=cs.background,
             assessment=cs.assessment, recommendation=cs.recommendation,
             generated_by_ai=cs.generated_by_ai, version=cs.version,
+            human_verified=cs.human_verified, edited_by_human=cs.edited_by_human,
             reviewed_at=cs.reviewed_at, created_at=cs.created_at,
         )
 
