@@ -110,7 +110,7 @@ export function MedTransferLanding() {
             </p>
             <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
               <Link
-                to="/dashboard"
+                to="/dashboard/patients"
                 className="flex items-center gap-2.5 bg-[#0084ff] text-white py-3.5 px-7 rounded-md text-base font-medium hover:bg-[#0066cc] hover:translate-x-0.5 transition-all duration-200"
               >
                 Start Coordinating Transfers
@@ -273,7 +273,7 @@ export function MedTransferLanding() {
             See the intelligent transfer coordinator in action. No setup required.
           </p>
           <Link
-            to="/dashboard"
+            to="/dashboard/transfers/new"
             className="inline-flex items-center gap-2.5 bg-[#0084ff] text-white py-4 px-10 rounded-md text-lg font-medium hover:bg-[#0066cc] transition-all duration-200"
           >
             Start Your First Transfer <ArrowRight className="w-5 h-5" />
