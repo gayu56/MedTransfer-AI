@@ -95,7 +95,7 @@ export function MedTransferLanding() {
           <div className="max-w-[800px]">
             <div className="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mb-8 border border-white/10">
               <Shield className="w-4 h-4 text-[#0084ff]" />
-              <span className="text-xs font-medium text-[#b8b8b8]">EMTALA Compliant · HIPAA Ready</span>
+              <span className="text-xs font-medium text-[#b8b8b8]">EMTALA Compliant · HIPAA Aware</span>
             </div>
 
             <h1 className="text-[40px] md:text-[72px] font-light leading-[1.08] mb-8 tracking-[-2px]">
@@ -292,8 +292,7 @@ export function MedTransferLanding() {
           </div>
           <div className="flex items-center gap-6">
             <span className="text-xs text-[#666]">EMTALA Compliant</span>
-            <span className="text-xs text-[#666]">HIPAA Ready</span>
-            <span className="text-xs text-[#666]">SOC 2 Architecture</span>
+            <span className="text-xs text-[#666]">HIPAA Aware</span>
           </div>
           <span className="text-xs text-[#666]">© 2026 MedTransfer AI. All rights reserved.</span>
         </div>
