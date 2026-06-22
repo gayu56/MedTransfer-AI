@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_secret_key: str = "dev-secret-key-change-in-production"
 
-    database_url: str = "sqlite+aiosqlite:///./iptc.db"
+    database_url: str = "sqlite+aiosqlite:///./iptc.db"  # Override with DATABASE_URL env var for PostgreSQL
 
     # Azure OpenAI
     azure_openai_endpoint: str = ""

@@ -3,10 +3,22 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
-engine = create_async_engine(
-    settings.database_url,
-    echo=settings.app_env == "development",
-)
+
+def _build_engine():
+    url = settings.database_url
+    kwargs: dict = {"echo": settings.app_env == "development"}
+
+    if url.startswith("postgresql"):
+        # PostgreSQL (Neon, etc.) — connection pool + SSL
+        kwargs.update({"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True})
+        # Neon requires SSL
+        if "neon.tech" in url or "neon" in url:
+            kwargs["connect_args"] = {"ssl": "require"}
+
+    return create_async_engine(url, **kwargs)
+
+
+engine = _build_engine()
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
