@@ -155,7 +155,7 @@ async def review_sbar(sbar_id: str, req: SBARReviewRequest, db: AsyncSession = D
     if req.approved:
         summary.human_verified = True
         summary.reviewed_at = datetime.now(timezone.utc)
-        summary.reviewed_by_user_id = "user-sarah-01"  # TODO: from auth context
+        summary.reviewed_by_user_id = "user-np-sarah"  # TODO: from auth context
 
     summary.updated_at = datetime.now(timezone.utc)
     await db.flush()
