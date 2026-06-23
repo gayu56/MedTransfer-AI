@@ -12,7 +12,7 @@ from app.services import call_service
 
 router = APIRouter()
 
-DEFAULT_USER_ID = "user-sarah-01"
+DEFAULT_USER_ID = "user-np-sarah"
 
 
 @router.post("", response_model=CallLogResponse, status_code=201)

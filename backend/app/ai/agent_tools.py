@@ -348,7 +348,7 @@ async def _create_transfer(
     from app.models.clinical_summary import ClinicalSummary
 
     DEFAULT_FACILITY_ID = "facility-metro-general"
-    DEFAULT_USER_ID = "user-sarah-01"
+    DEFAULT_USER_ID = "user-np-sarah"
 
     transfer = await transfer_service.create_transfer(
         db=db, patient_id=patient_id, sending_facility_id=DEFAULT_FACILITY_ID,

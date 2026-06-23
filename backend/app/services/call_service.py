@@ -585,7 +585,7 @@ async def run_ai_call_sequence(db: AsyncSession, transfer_id: str) -> list[dict]
         call = CallLog(
             transfer_id=transfer_id,
             facility_id=match.facility_id,
-            called_by_user_id="user-sarah-01",
+            called_by_user_id="user-np-sarah",
             call_started_at=datetime.now(timezone.utc),
             outcome="PENDING",
             is_simulated=True,
@@ -715,7 +715,7 @@ async def run_ai_call_parallel(db: AsyncSession, transfer_id: str) -> list[dict]
         call = CallLog(
             transfer_id=transfer_id,
             facility_id=match.facility_id,
-            called_by_user_id="user-sarah-01",
+            called_by_user_id="user-np-sarah",
             call_started_at=datetime.now(timezone.utc),
             outcome="PENDING",
             is_simulated=True,
@@ -1076,7 +1076,7 @@ async def run_auto_call_sequence(
         transfer_id=transfer_id,
         event_type="BROADCAST_SENT",
         event_description=f"Transfer request broadcast to {len(broadcastable)} facilities simultaneously",
-        triggered_by_user_id="user-sarah-01",
+        triggered_by_user_id="user-np-sarah",
         triggered_by_system=True,
     )
     db.add(broadcast_timeline)
@@ -1094,7 +1094,7 @@ async def run_auto_call_sequence(
         call = CallLog(
             transfer_id=transfer_id,
             facility_id=match.facility_id,
-            called_by_user_id="user-sarah-01",
+            called_by_user_id="user-np-sarah",
             notes=f"Broadcast transfer request sent to {fname}",
             call_started_at=datetime.now(timezone.utc),
             outcome="PENDING",
@@ -1185,7 +1185,7 @@ async def run_auto_call_sequence(
             event_type=f"BROADCAST_{call.outcome}",
             event_description=f"{fname} — {call.outcome.replace('_', ' ').title()}"
                 + (f": {sim.get('notes', '')}" if sim.get('notes') else ""),
-            triggered_by_user_id="user-sarah-01",
+            triggered_by_user_id="user-np-sarah",
             triggered_by_system=True,
         )
         db.add(timeline)

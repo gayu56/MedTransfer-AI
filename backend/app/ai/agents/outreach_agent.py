@@ -159,7 +159,7 @@ class OutreachAgent(BaseAgent):
             call = CallLog(
                 transfer_id=transfer_id,
                 facility_id=match.facility_id,
-                called_by_user_id="user-sarah-01",
+                called_by_user_id="user-np-sarah",
                 notes=f"Broadcast request sent to {fname}",
                 call_started_at=datetime.now(timezone.utc),
                 outcome="PENDING",
