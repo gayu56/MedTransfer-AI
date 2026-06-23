@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft, CheckCircle, XCircle, Clock, AlertTriangle, Building2, Truck, Shield, FileText, Phone, Pencil, ShieldCheck } from 'lucide-react'
-import { fetchTransfer, acceptTransfer, declineTransfer, updateTransferStatus, updateCompliance, reviewSBAR } from '../services/api'
+import { ArrowLeft, CheckCircle, XCircle, Clock, AlertTriangle, Building2, Truck, Shield, FileText, Phone, Pencil, ShieldCheck, Upload, Download, Trash2 } from 'lucide-react'
+import { fetchTransfer, acceptTransfer, declineTransfer, updateTransferStatus, updateCompliance, reviewSBAR, fetchComplianceDocuments, uploadComplianceDocument, deleteComplianceDocument, getDocumentDownloadUrl } from '../services/api'
 import CallPanel from '../components/CallPanel'
 
 const statusSteps = ['INITIATED', 'PENDING_REVIEW', 'ACCEPTED', 'TRANSPORT_DISPATCHED']
@@ -27,14 +27,38 @@ export default function TransferDetail() {
   const [sbarDraft, setSbarDraft] = useState<Record<string, string>>({})
   const [sbarSaving, setSbarSaving] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [complianceDocs, setComplianceDocs] = useState<any[]>([])
+  const [uploading, setUploading] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [pendingDocType, setPendingDocType] = useState<string | null>(null)
 
   const load = async () => {
     if (!id) return
     try {
       const res = await fetchTransfer(id)
       setTransfer(res)
+      const docs = await fetchComplianceDocuments(id)
+      setComplianceDocs(docs)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
+  }
+
+  const handleDocUpload = async (docType: string, file: File) => {
+    if (!id) return
+    setUploading(docType)
+    try {
+      await uploadComplianceDocument(id, docType, file)
+      await load()
+    } catch (e) { console.error('Upload failed:', e) }
+    setUploading(null)
+  }
+
+  const handleDocDelete = async (docId: string) => {
+    if (!id) return
+    try {
+      await deleteComplianceDocument(id, docId)
+      await load()
+    } catch (e) { console.error('Delete failed:', e) }
   }
 
   useEffect(() => { load() }, [id])
@@ -284,34 +308,96 @@ export default function TransferDetail() {
               <h2 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
                 <Shield className="w-4 h-4 text-slate-400" /> EMTALA Compliance
               </h2>
+              <input
+                type="file"
+                ref={fileInputRef}
+                className="hidden"
+                accept=".pdf,.png,.jpg,.jpeg"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file && pendingDocType) {
+                    handleDocUpload(pendingDocType, file)
+                  }
+                  e.target.value = ''
+                  setPendingDocType(null)
+                }}
+              />
               <div className="space-y-2">
                 {[
-                  { field: 'mse_completed', label: 'Medical Screening Exam', locked: true, hint: 'Pre-verified from EHR' },
-                  { field: 'stabilization_attempted', label: 'Stabilization Documented', locked: true, hint: 'Pre-verified from EHR' },
-                  { field: 'md_certification_signed', label: 'MD Certification Signed', locked: false },
-                  { field: 'consent_obtained', label: 'Patient Consent', locked: false },
-                  { field: 'receiving_facility_confirmed', label: 'Receiving Facility Confirmed', locked: true, hint: 'Auto-confirmed on acceptance' },
-                  { field: 'transport_appropriate', label: 'Transport Appropriate', locked: false },
-                  { field: 'records_sent', label: 'Records Sent', locked: false },
-                ].map(({ field, label, locked, hint }) => (
-                  <button
-                    key={field}
-                    onClick={() => !locked && handleComplianceToggle(field, cr[field])}
-                    className={`w-full flex items-center gap-3 p-2 rounded-lg transition-colors text-left ${
-                      locked ? 'cursor-default' : 'hover:bg-slate-50 cursor-pointer'
-                    }`}
-                  >
-                    {(cr[field] || locked) ? (
-                      <CheckCircle className="w-5 h-5 shrink-0 text-emerald-500" />
-                    ) : (
-                      <div className="w-5 h-5 rounded-full border-2 border-slate-300 shrink-0" />
-                    )}
-                    <div className="flex flex-col">
-                      <span className={`text-sm ${(cr[field] || locked) ? 'text-slate-900' : 'text-slate-500'}`}>{label}</span>
-                      {locked && hint && <span className="text-[10px] text-slate-400">{hint}</span>}
+                  { field: 'mse_completed', label: 'Medical Screening Exam', locked: true, hint: 'Pre-verified from EHR', docType: null },
+                  { field: 'stabilization_attempted', label: 'Stabilization Documented', locked: true, hint: 'Pre-verified from EHR', docType: null },
+                  { field: 'md_certification_signed', label: 'MD Certification Signed', locked: false, docType: 'MD_CERTIFICATION' },
+                  { field: 'consent_obtained', label: 'Patient Consent', locked: false, docType: 'CONSENT_FORM' },
+                  { field: 'receiving_facility_confirmed', label: 'Receiving Facility Confirmed', locked: true, hint: 'Auto-confirmed on acceptance', docType: null },
+                  { field: 'transport_appropriate', label: 'Transport Appropriate', locked: false, docType: 'TRANSPORT_ORDER' },
+                  { field: 'records_sent', label: 'Records Sent', locked: false, docType: 'RECORDS_PACKET' },
+                ].map(({ field, label, locked, hint, docType }) => {
+                  const fieldDocs = docType ? complianceDocs.filter((d: any) => d.document_type === docType) : []
+                  return (
+                    <div key={field} className="rounded-lg border border-slate-100 p-2">
+                      <button
+                        onClick={() => !locked && handleComplianceToggle(field, cr[field])}
+                        className={`w-full flex items-center gap-3 transition-colors text-left ${
+                          locked ? 'cursor-default' : 'hover:bg-slate-50 cursor-pointer'
+                        }`}
+                      >
+                        {(cr[field] || locked) ? (
+                          <CheckCircle className="w-5 h-5 shrink-0 text-emerald-500" />
+                        ) : (
+                          <div className="w-5 h-5 rounded-full border-2 border-slate-300 shrink-0" />
+                        )}
+                        <div className="flex flex-col flex-1">
+                          <span className={`text-sm ${(cr[field] || locked) ? 'text-slate-900' : 'text-slate-500'}`}>{label}</span>
+                          {locked && hint && <span className="text-[10px] text-slate-400">{hint}</span>}
+                        </div>
+                      </button>
+                      {/* Document upload area */}
+                      {docType && (
+                        <div className="ml-8 mt-1.5">
+                          {fieldDocs.length > 0 ? (
+                            <div className="space-y-1">
+                              {fieldDocs.map((doc: any) => (
+                                <div key={doc.id} className="flex items-center gap-2 text-xs bg-slate-50 rounded px-2 py-1">
+                                  <FileText className="w-3.5 h-3.5 text-slate-400" />
+                                  <span className="flex-1 truncate text-slate-700">{doc.file_name}</span>
+                                  <span className="text-slate-400">{(doc.file_size_bytes / 1024).toFixed(0)}KB</span>
+                                  <a
+                                    href={getDocumentDownloadUrl(id!, doc.id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="p-0.5 hover:text-primary-600 text-slate-400"
+                                    title="Download"
+                                  >
+                                    <Download className="w-3.5 h-3.5" />
+                                  </a>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleDocDelete(doc.id) }}
+                                    className="p-0.5 hover:text-rose-600 text-slate-400"
+                                    title="Delete"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setPendingDocType(docType)
+                              fileInputRef.current?.click()
+                            }}
+                            disabled={uploading === docType}
+                            className="mt-1 flex items-center gap-1.5 text-[11px] text-primary-600 hover:text-primary-700 font-medium"
+                          >
+                            <Upload className="w-3.5 h-3.5" />
+                            {uploading === docType ? 'Uploading...' : fieldDocs.length > 0 ? 'Upload another' : 'Upload document'}
+                          </button>
+                        </div>
+                      )}
                     </div>
-                  </button>
-                ))}
+                  )
+                })}
               </div>
               <div className={`mt-3 p-2 rounded-lg text-center text-xs font-medium ${
                 cr.all_checks_passed ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'

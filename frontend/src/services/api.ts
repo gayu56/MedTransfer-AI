@@ -58,6 +58,31 @@ export const checkCanDispatch = (transferId: string) =>
 export const checkCanBroadcast = (transferId: string) =>
   request<any>(`/compliance/${transferId}/can-broadcast`)
 
+// Compliance Documents
+export const fetchComplianceDocuments = (transferId: string) =>
+  request<any[]>(`/compliance/${transferId}/documents`)
+
+export const uploadComplianceDocument = async (transferId: string, documentType: string, file: File) => {
+  const formData = new FormData()
+  formData.append('document_type', documentType)
+  formData.append('file', file)
+  const res = await fetch(`${BASE_URL}/compliance/${transferId}/documents`, {
+    method: 'POST',
+    body: formData,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail || 'Upload failed')
+  }
+  return res.json()
+}
+
+export const deleteComplianceDocument = (transferId: string, documentId: string) =>
+  request<any>(`/compliance/${transferId}/documents/${documentId}`, { method: 'DELETE' })
+
+export const getDocumentDownloadUrl = (transferId: string, documentId: string) =>
+  `${BASE_URL}/compliance/${transferId}/documents/${documentId}/download`
+
 // AI Agent
 export const chatWithAgent = (data: any) =>
   request<any>('/agent/chat', { method: 'POST', body: JSON.stringify(data) })

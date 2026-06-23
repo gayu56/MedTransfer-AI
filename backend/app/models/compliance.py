@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -43,6 +43,7 @@ class ComplianceRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     transfer = relationship("TransferRequest", back_populates="compliance_record")
+    documents = relationship("ComplianceDocument", back_populates="compliance", order_by="ComplianceDocument.uploaded_at")
 
     @property
     def all_checks_passed(self) -> bool:
@@ -67,3 +68,19 @@ class ComplianceRecord(Base):
             "records_sent": self.records_sent,
             "all_checks_passed": self.all_checks_passed,
         }
+
+
+class ComplianceDocument(Base):
+    __tablename__ = "compliance_documents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    compliance_id: Mapped[str] = mapped_column(String(36), ForeignKey("compliance_records.id"), nullable=False)
+    document_type: Mapped[str] = mapped_column(String(50), nullable=False)  # MD_CERTIFICATION, CONSENT_FORM, RECORDS_PACKET, TRANSPORT_ORDER
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    uploaded_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"))
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    compliance = relationship("ComplianceRecord", back_populates="documents")

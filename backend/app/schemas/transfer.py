@@ -70,6 +70,20 @@ class ComplianceResponse(BaseModel):
     transport_appropriate: bool = False
     records_sent: bool = False
     all_checks_passed: bool = False
+    documents: list["ComplianceDocumentResponse"] = []
+
+    class Config:
+        from_attributes = True
+
+
+class ComplianceDocumentResponse(BaseModel):
+    id: str
+    document_type: str
+    file_name: str
+    file_size_bytes: int
+    mime_type: str
+    uploaded_at: datetime | None = None
+    download_url: str | None = None
 
     class Config:
         from_attributes = True

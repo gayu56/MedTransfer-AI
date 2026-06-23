@@ -4,7 +4,7 @@ from app.models.user import User
 from app.models.patient import Patient
 from app.models.transfer import TransferRequest, FacilityMatch, TransferTimeline
 from app.models.clinical_summary import ClinicalSummary
-from app.models.compliance import ComplianceRecord
+from app.models.compliance import ComplianceRecord, ComplianceDocument
 from app.models.transport import TransportRequest
 from app.models.call_log import CallLog
 
@@ -20,6 +20,7 @@ __all__ = [
     "TransferTimeline",
     "ClinicalSummary",
     "ComplianceRecord",
+    "ComplianceDocument",
     "TransportRequest",
     "CallLog",
 ]
