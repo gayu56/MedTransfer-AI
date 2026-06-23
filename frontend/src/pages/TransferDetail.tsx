@@ -333,22 +333,28 @@ export default function TransferDetail() {
                   { field: 'records_sent', label: 'Records Sent', locked: false, docType: 'RECORDS_PACKET' },
                 ].map(({ field, label, locked, hint, docType }) => {
                   const fieldDocs = docType ? complianceDocs.filter((d: any) => d.document_type === docType) : []
+                  const needsDoc = !!docType && fieldDocs.length === 0 && !cr[field]
                   return (
-                    <div key={field} className="rounded-lg border border-slate-100 p-2">
+                    <div key={field} className={`rounded-lg border p-2 ${needsDoc ? 'border-amber-200 bg-amber-50/30' : 'border-slate-100'}`}>
                       <button
-                        onClick={() => !locked && handleComplianceToggle(field, cr[field])}
+                        onClick={() => {
+                          if (locked) return
+                          if (needsDoc) return
+                          handleComplianceToggle(field, cr[field])
+                        }}
                         className={`w-full flex items-center gap-3 transition-colors text-left ${
-                          locked ? 'cursor-default' : 'hover:bg-slate-50 cursor-pointer'
-                        }`}
+                          locked || needsDoc ? 'cursor-default' : 'hover:bg-slate-50 cursor-pointer'
+                        } ${needsDoc ? 'opacity-60' : ''}`}
                       >
                         {(cr[field] || locked) ? (
                           <CheckCircle className="w-5 h-5 shrink-0 text-emerald-500" />
                         ) : (
-                          <div className="w-5 h-5 rounded-full border-2 border-slate-300 shrink-0" />
+                          <div className={`w-5 h-5 rounded-full border-2 shrink-0 ${needsDoc ? 'border-amber-300' : 'border-slate-300'}`} />
                         )}
                         <div className="flex flex-col flex-1">
                           <span className={`text-sm ${(cr[field] || locked) ? 'text-slate-900' : 'text-slate-500'}`}>{label}</span>
                           {locked && hint && <span className="text-[10px] text-slate-400">{hint}</span>}
+                          {needsDoc && <span className="text-[10px] text-amber-600 font-medium">Upload document to enable</span>}
                         </div>
                       </button>
                       {/* Document upload area */}

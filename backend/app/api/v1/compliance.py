@@ -73,6 +73,30 @@ async def update_compliance(
     req: ComplianceUpdateRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    # Fields that require a document upload before they can be checked
+    FIELD_TO_DOC_TYPE = {
+        "md_certification_signed": "MD_CERTIFICATION",
+        "consent_obtained": "CONSENT_FORM",
+        "transport_appropriate": "TRANSPORT_ORDER",
+        "records_sent": "RECORDS_PACKET",
+    }
+
+    # Enforce: document must exist before checking the item
+    if req.value and req.field in FIELD_TO_DOC_TYPE:
+        record = await compliance_service.get_compliance(db, transfer_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Compliance record not found")
+        doc_result = await db.execute(
+            select(ComplianceDocument)
+            .where(ComplianceDocument.compliance_id == record.id)
+            .where(ComplianceDocument.document_type == FIELD_TO_DOC_TYPE[req.field])
+        )
+        if not doc_result.scalars().first():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Upload a supporting document before checking '{req.field.replace('_', ' ')}'",
+            )
+
     kwargs = {}
     if req.consent_signer_name:
         kwargs["consent_signer_name"] = req.consent_signer_name
