@@ -68,7 +68,7 @@ class FacilityMatch(Base):
     historical_score: Mapped[float] = mapped_column(Float, default=0)
     distance_miles: Mapped[float | None] = mapped_column(Float)
     estimated_transport_min: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(20), default="SUGGESTED")  # SUGGESTED, SENT, ACCEPTED, DECLINED, SKIPPED
+    status: Mapped[str] = mapped_column(String(30), default="SUGGESTED")  # SUGGESTED, SENT, ACCEPTED, DECLINED, SKIPPED, AWAITING_CONFIRMATION
     declined_reason: Mapped[str | None] = mapped_column(Text)
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

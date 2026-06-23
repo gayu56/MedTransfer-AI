@@ -43,11 +43,30 @@ export default function TransferDetail() {
     finally { setLoading(false) }
   }
 
+  const docTypeToField: Record<string, string> = {
+    MD_CERTIFICATION: 'md_certification_signed',
+    CONSENT_FORM: 'consent_obtained',
+    TRANSPORT_ORDER: 'transport_appropriate',
+    RECORDS_PACKET: 'records_sent',
+  }
+
   const handleDocUpload = async (docType: string, file: File) => {
     if (!id) return
     setUploading(docType)
     try {
       await uploadComplianceDocument(id, docType, file)
+      // Auto-check the corresponding compliance field after upload
+      const field = docTypeToField[docType]
+      if (field && transfer?.compliance_record && !transfer.compliance_record[field]) {
+        await updateCompliance(id, { field, value: true })
+        // Auto-advance to TRANSPORT_DISPATCHED if all checks now pass
+        const updated = await fetchTransfer(id)
+        if (updated?.compliance_record?.all_checks_passed && updated.status === 'ACCEPTED') {
+          try {
+            await updateTransferStatus(id, { status: 'TRANSPORT_DISPATCHED' })
+          } catch (e) { console.error('Auto-dispatch failed:', e) }
+        }
+      }
       await load()
     } catch (e) { console.error('Upload failed:', e) }
     setUploading(null)
