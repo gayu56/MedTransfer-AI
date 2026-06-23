@@ -124,7 +124,7 @@ async def list_transfers(
     count_query = select(func.count(TransferRequest.id))
 
     if status == "active":
-        active_statuses = ["DRAFT", "INITIATED", "PENDING_REVIEW", "ACCEPTED", "TRANSPORT_DISPATCHED", "IN_TRANSIT"]
+        active_statuses = ["DRAFT", "INITIATED", "PENDING_REVIEW", "ACCEPTED", "TRANSPORT_READY", "IN_TRANSIT"]
         query = query.where(TransferRequest.status.in_(active_statuses))
         count_query = count_query.where(TransferRequest.status.in_(active_statuses))
     elif status:
@@ -165,7 +165,7 @@ async def update_transfer_status(
     if new_status == "ACCEPTED":
         transfer.accepted_at = now
         transfer.accepted_by_user_id = user_id
-    elif new_status == "TRANSPORT_DISPATCHED":
+    elif new_status == "TRANSPORT_READY":
         transfer.transport_dispatched_at = now
     elif new_status in ("EN_ROUTE_PICKUP", "ON_SCENE"):
         pass  # EMS check-in — no specific timestamp column, logged in timeline
@@ -304,7 +304,7 @@ async def decline_transfer(
 
 async def get_transfer_analytics(db: AsyncSession) -> dict:
     total = (await db.execute(select(func.count(TransferRequest.id)))).scalar() or 0
-    active_statuses = ["INITIATED", "PENDING_REVIEW", "ACCEPTED", "TRANSPORT_DISPATCHED", "IN_TRANSIT"]
+    active_statuses = ["INITIATED", "PENDING_REVIEW", "ACCEPTED", "TRANSPORT_READY", "IN_TRANSIT"]
     active = (await db.execute(
         select(func.count(TransferRequest.id)).where(TransferRequest.status.in_(active_statuses))
     )).scalar() or 0

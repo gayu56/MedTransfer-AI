@@ -115,6 +115,16 @@ async def update_compliance(
     if not record:
         raise HTTPException(status_code=404, detail="Compliance record not found or invalid field")
 
+    # Auto-advance transfer to TRANSPORT_READY when all checks pass
+    if record.all_checks_passed:
+        from app.services import transfer_service
+        transfer = await transfer_service.get_transfer(db, transfer_id)
+        if transfer and transfer.status == "ACCEPTED":
+            await transfer_service.update_transfer_status(
+                db, transfer_id, "TRANSPORT_READY",
+                notes="Auto-advanced: all EMTALA checks passed",
+            )
+
     return ComplianceResponse(
         id=record.id,
         mse_completed=record.mse_completed,

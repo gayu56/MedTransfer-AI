@@ -4,13 +4,13 @@ import { ArrowLeft, CheckCircle, XCircle, Clock, AlertTriangle, Building2, Truck
 import { fetchTransfer, acceptTransfer, declineTransfer, updateTransferStatus, updateCompliance, reviewSBAR, fetchComplianceDocuments, uploadComplianceDocument, deleteComplianceDocument, getDocumentDownloadUrl } from '../services/api'
 import CallPanel from '../components/CallPanel'
 
-const statusSteps = ['INITIATED', 'PENDING_REVIEW', 'ACCEPTED', 'TRANSPORT_DISPATCHED']
+const statusSteps = ['INITIATED', 'PENDING_REVIEW', 'ACCEPTED', 'TRANSPORT_READY']
 const statusColors: Record<string, string> = {
   DRAFT: 'bg-slate-100 text-slate-700',
   INITIATED: 'bg-blue-100 text-blue-700',
   PENDING_REVIEW: 'bg-amber-100 text-amber-700',
   ACCEPTED: 'bg-emerald-100 text-emerald-700',
-  TRANSPORT_DISPATCHED: 'bg-purple-100 text-purple-700',
+  TRANSPORT_READY: 'bg-purple-100 text-purple-700',
   DECLINED: 'bg-rose-100 text-rose-700',
   RE_ROUTING: 'bg-orange-100 text-orange-700',
 }
@@ -59,11 +59,11 @@ export default function TransferDetail() {
       const field = docTypeToField[docType]
       if (field && transfer?.compliance_record && !transfer.compliance_record[field]) {
         await updateCompliance(id, { field, value: true })
-        // Auto-advance to TRANSPORT_DISPATCHED if all checks now pass
+        // Auto-advance to TRANSPORT_READY if all checks now pass
         const updated = await fetchTransfer(id)
         if (updated?.compliance_record?.all_checks_passed && updated.status === 'ACCEPTED') {
           try {
-            await updateTransferStatus(id, { status: 'TRANSPORT_DISPATCHED' })
+            await updateTransferStatus(id, { status: 'TRANSPORT_READY' })
           } catch (e) { console.error('Auto-dispatch failed:', e) }
         }
       }
@@ -97,11 +97,11 @@ export default function TransferDetail() {
   const handleComplianceToggle = async (field: string, current: boolean) => {
     if (!id) return
     await updateCompliance(id, { field, value: !current })
-    // Auto-advance to TRANSPORT_DISPATCHED when all EMTALA checks pass
+    // Auto-advance to TRANSPORT_READY when all EMTALA checks pass
     const updated = await fetchTransfer(id)
     if (updated?.compliance_record?.all_checks_passed && updated.status === 'ACCEPTED') {
       try {
-        await updateTransferStatus(id, { status: 'TRANSPORT_DISPATCHED' })
+        await updateTransferStatus(id, { status: 'TRANSPORT_READY' })
       } catch (e) { console.error('Auto-dispatch failed:', e) }
     }
     load()
@@ -132,15 +132,15 @@ export default function TransferDetail() {
             <Phone className="w-3.5 h-3.5" /> Scroll down to Call Center → call a facility to accept
           </div>
         )}
-        {/* Auto-dispatch: no manual advance button — TRANSPORT_DISPATCHED triggers automatically when EMTALA completes */}
+        {/* Auto-dispatch: no manual advance button — TRANSPORT_READY triggers automatically when EMTALA completes */}
         {transfer.status === 'ACCEPTED' && cr && !cr.all_checks_passed && (
           <div className="px-3 py-1.5 bg-amber-50 text-amber-700 rounded-lg text-xs font-medium border border-amber-200 flex items-center gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5" /> Complete EMTALA checklist to auto-dispatch transport
           </div>
         )}
-        {transfer.status === 'TRANSPORT_DISPATCHED' && (
+        {transfer.status === 'TRANSPORT_READY' && (
           <div className="px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded-lg text-xs font-bold border border-emerald-300 flex items-center gap-1.5">
-            <CheckCircle className="w-3.5 h-3.5" /> Transport Dispatched — EMTALA Complete
+            <CheckCircle className="w-3.5 h-3.5" /> Transport Ready — EMTALA Complete
           </div>
         )}
       </div>

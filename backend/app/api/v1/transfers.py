@@ -233,7 +233,7 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
 ):
     # FIX 3 + AGENTIC MESH: ComplianceAgent enforces EMTALA dispatch gate
-    if req.status == "TRANSPORT_DISPATCHED":
+    if req.status == "TRANSPORT_READY":
         from app.ai.agents.orchestrator_agent import orchestrator_agent
         gate_result = await orchestrator_agent.fallback(
             task=f"Enforce dispatch gate for transfer {transfer_id}",

@@ -690,7 +690,7 @@ async def _get_next_action(db: AsyncSession, transfer_id: str) -> dict:
         else:
             actions.append({"action": "DISPATCH_TRANSPORT", "description": "All EMTALA checks passed — ready to dispatch transport", "priority": "HIGH"})
 
-    elif status == "TRANSPORT_DISPATCHED":
+    elif status == "TRANSPORT_READY":
         actions.append({"action": "MONITOR", "description": "Transport is en route. Monitor for arrival.", "priority": "MEDIUM"})
 
     elif status == "IN_TRANSIT":

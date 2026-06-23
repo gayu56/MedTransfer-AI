@@ -8,7 +8,7 @@ const statusColors: Record<string, string> = {
   INITIATED: 'bg-blue-100 text-blue-700',
   PENDING_REVIEW: 'bg-amber-100 text-amber-700',
   ACCEPTED: 'bg-emerald-100 text-emerald-700',
-  TRANSPORT_DISPATCHED: 'bg-purple-100 text-purple-700',
+  TRANSPORT_READY: 'bg-purple-100 text-purple-700',
   IN_TRANSIT: 'bg-indigo-100 text-indigo-700',
   ARRIVED: 'bg-teal-100 text-teal-700',
   COMPLETED: 'bg-green-100 text-green-700',
