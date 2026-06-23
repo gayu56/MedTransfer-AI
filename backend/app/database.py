@@ -6,6 +6,13 @@ from app.config import settings
 
 def _build_engine():
     url = settings.database_url
+
+    # Ensure async driver: convert postgresql:// → postgresql+asyncpg://
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+
     kwargs: dict = {"echo": settings.app_env == "development"}
 
     if url.startswith("postgresql"):
