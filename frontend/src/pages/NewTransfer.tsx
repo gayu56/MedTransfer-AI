@@ -17,6 +17,7 @@ export default function NewTransfer() {
   const [sbarDraft, setSbarDraft] = useState<Record<string, string>>({})
   const [sbarApproved, setSbarApproved] = useState(false)
   const [sbarSaving, setSbarSaving] = useState(false)
+  const [sbarError, setSbarError] = useState<string | null>(null)
 
   const [form, setForm] = useState({
     urgency: 'EMERGENT',
@@ -290,12 +291,19 @@ export default function NewTransfer() {
                   </button>
                   <button
                     onClick={async () => {
-                      if (!sbarId) return
+                      if (!sbarId) {
+                        setSbarError('SBAR ID missing — please regenerate the SBAR.')
+                        return
+                      }
                       setSbarSaving(true)
+                      setSbarError(null)
                       try {
                         await reviewSBAR(sbarId, { approved: true })
                         setSbarApproved(true)
-                      } catch (e) { console.error('SBAR approve failed:', e) }
+                      } catch (e: any) {
+                        console.error('SBAR approve failed:', e)
+                        setSbarError(e?.message || 'Failed to approve SBAR. Please try again.')
+                      }
                       setSbarSaving(false)
                     }}
                     disabled={sbarSaving}
@@ -304,6 +312,12 @@ export default function NewTransfer() {
                     <ShieldCheck className="w-3 h-3" /> {sbarSaving ? 'Approving...' : 'Verify & Approve'}
                   </button>
                 </div>
+              </div>
+            )}
+            {sbarError && (
+              <div className="flex items-center gap-2 mb-4 p-3 bg-rose-50 border border-rose-200 rounded-lg">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <p className="text-sm text-rose-700">{sbarError}</p>
               </div>
             )}
             {sbarEditing && (

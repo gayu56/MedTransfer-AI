@@ -1,4 +1,5 @@
 import ssl as _ssl
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -15,19 +16,19 @@ def _build_engine():
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
 
-    # Strip sslmode from URL query params — asyncpg doesn't support it as a query param
-    if "sslmode=" in url:
-        import re
-        url = re.sub(r"[?&]sslmode=[^&]*", "", url)
-        # Clean up leftover ? or & at end
-        url = url.rstrip("?&")
+    # Strip sslmode from URL — asyncpg does not accept it as a query param
+    if "sslmode" in url:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        params.pop("sslmode", None)
+        url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
     kwargs: dict = {"echo": settings.app_env == "development"}
 
-    if url.startswith("postgresql"):
+    if "postgresql" in url:
         # PostgreSQL (Neon, etc.) — connection pool + SSL
         kwargs.update({"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True})
-        # asyncpg needs an SSLContext, not a string
+        # asyncpg needs a proper SSLContext object
         ssl_ctx = _ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = _ssl.CERT_NONE
