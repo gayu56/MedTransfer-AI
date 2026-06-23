@@ -1,3 +1,5 @@
+import ssl as _ssl
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -13,14 +15,23 @@ def _build_engine():
     elif url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
 
+    # Strip sslmode from URL query params — asyncpg doesn't support it as a query param
+    if "sslmode=" in url:
+        import re
+        url = re.sub(r"[?&]sslmode=[^&]*", "", url)
+        # Clean up leftover ? or & at end
+        url = url.rstrip("?&")
+
     kwargs: dict = {"echo": settings.app_env == "development"}
 
     if url.startswith("postgresql"):
         # PostgreSQL (Neon, etc.) — connection pool + SSL
         kwargs.update({"pool_size": 5, "max_overflow": 10, "pool_pre_ping": True})
-        # Neon requires SSL
-        if "neon.tech" in url or "neon" in url:
-            kwargs["connect_args"] = {"ssl": "require"}
+        # asyncpg needs an SSLContext, not a string
+        ssl_ctx = _ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = _ssl.CERT_NONE
+        kwargs["connect_args"] = {"ssl": ssl_ctx}
 
     return create_async_engine(url, **kwargs)
 
